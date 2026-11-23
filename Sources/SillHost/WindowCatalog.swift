@@ -156,6 +156,8 @@ final class WindowCatalog {
     /// on-screen there (unverified), it is fetched from the full window list so its tile stays in
     /// the client's bar and the coordinator can still find it.
     var stagedWindowID: CGWindowID?
+    /// The 1Password approval prompt on screen in the last look, if any (CatalogWindows.isOnePasswordPrompt).
+    private(set) var onePasswordPromptID: CGWindowID?
 
     /// A window in the plain values CatalogWindows judges it by.
     static func plain(_ w: SCWindow) -> CatalogWindows.Window {
@@ -340,6 +342,7 @@ final class WindowCatalog {
         // An app's own windows only (CatalogWindows): no widgets, wallpaper or backstop, nothing of
         // Sill's, and no helper's window (LayerProbeParent, macOS's own interface, a tool's overlay).
         let plain = content.windows.map(Self.plain)
+        onePasswordPromptID = zip(content.windows, plain).first { CatalogWindows.isOnePasswordPrompt($1) }?.0.windowID
         var visible = zip(content.windows, plain).filter { CatalogWindows.lists($1, ownPID: Self.ownPID) }.map(\.0)
         for line in CatalogWindows.leftOutLines(plain, ownPID: Self.ownPID, named: &leftOutNamed) { print(line) }
         if let pinned, !visible.contains(where: { $0.windowID == pinned.windowID }) { visible.append(pinned) }

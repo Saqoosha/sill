@@ -77,7 +77,14 @@ enum CatalogWindows {
 
     /// Whether a device's window strip gets this window.
     static func lists(_ w: Window, ownPID: Int32) -> Bool {
-        isAppWindow(w, ownPID: ownPID) && helper(w) == nil
+        (isAppWindow(w, ownPID: ownPID) && helper(w) == nil) || isOnePasswordPrompt(w)
+    }
+
+    /// 1Password's approval prompt: a floating panel on layer 101, measured at 400 × 325 points on
+    /// 1Password 8.12.44. The size bounds keep its larger floating windows out.
+    static func isOnePasswordPrompt(_ w: Window) -> Bool {
+        w.bundleID == "com.1password.1password" && w.layer == 101
+            && (300...600).contains(w.width) && (200...600).contains(w.height)
     }
 
     /// The lines the catalog prints for the windows one look left out that the filter before issue
