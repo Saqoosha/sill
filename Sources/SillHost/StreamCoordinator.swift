@@ -1938,12 +1938,16 @@ package final class StreamCoordinator {
         case .stay: return
         }
         switching = true
+        let sourceBeforeSwitch = active
         if source != active { missingPolls = 0 }    // a window's looks off the list are its own
         restartOf = (source == active && source != .none) ? source : nil
         defer {
             switching = false
             restartOf = nil
             promptFollow.streaming(Self.followSource(active), prompts: catalog.onePasswordPromptIDs, now: CFAbsoluteTimeGetCurrent())
+            if active != sourceBeforeSwitch { sourceShownAt = ProcessInfo.processInfo.systemUptime }
+            // A prompt seen during this switch is shown now, not at the next poll.
+            if promptSwitch == nil, !catalog.onePasswordPromptIDs.isEmpty { Task { @MainActor in await self.followOnePasswordPrompt() } }
             var pick = pickArrivedWhileSwitching
             pickArrivedWhileSwitching = nil
             // Requests that arrived mid-switch, applied now that `switching` is clear again (every
@@ -2533,6 +2537,7 @@ package final class StreamCoordinator {
     private var promptWatch: Task<Void, Never>?
     private var promptWatchActivity: NSObjectProtocol?
     private var promptFirstSeen: [CGWindowID: TimeInterval] = [:]
+    private var sourceShownAt: TimeInterval = 0
     private var watchesPrompts = false
     private var lastRaiseCheck: CFAbsoluteTime = 0
     private var lastActivationAt: CFAbsoluteTime = 0
@@ -2571,8 +2576,9 @@ package final class StreamCoordinator {
                     else { Stats.shared.bump(gone(device) ? "in.revoked" : "in.locked") }
                     continue
                 }
-                // A prompt can open during the hold: judged again, as the press would land now.
-                if promptHoldsInput(event, from: device) {
+                // A prompt can open during the hold: judged again, where the press would land.
+                if promptHoldsInput(event, from: device, in: rect) {
+                    injector.stopRepeating()
                     if injector.isUpOfSomethingDown(event) { injector.apply(event, in: .null, from: device) }
                     continue
                 }
@@ -2652,9 +2658,21 @@ package final class StreamCoordinator {
     /// rectangle cannot be read: the repeat stops), held while input waits for an app's activation (a
     /// repeat must not go out ahead of it), else on the source.
     private func keyRepeatLanding() -> KeyRepeat.Landing {
-        guard currentSourceRect() != nil else { return .nowhere }
+        guard currentSourceRect() != nil, !promptStopsKeyRepeat() else { return .nowhere }
         if !heldInput.isEmpty || CFAbsoluteTimeGetCurrent() < holdUntil { return .held }
         return .lands
+    }
+
+    /// A held Return must not repeat into a prompt that opened after it went down.
+    private func promptStopsKeyRepeat() -> Bool {
+        if promptSwitch != nil { return true }
+        var streamedPrompt: CGWindowID?
+        if case .window(let id) = active, catalog.onePasswordPromptIDs.contains(id) { streamedPrompt = id }
+        if streamedPrompt != nil, !promptFollow.armed(now: CFAbsoluteTimeGetCurrent(), away: true) { return true }
+        let live = WindowCatalog.livePrompts()
+        notePrompts(live.map(\.id))
+        let prompts = live.filter { $0.id != streamedPrompt }
+        return !prompts.isEmpty && unseenPromptHolds(prompts, event: nil, isPress: false, away: true)
     }
 
     private func raiseIfInteracting(_ event: InputEvent) {
@@ -2783,8 +2801,8 @@ package final class StreamCoordinator {
     }
 
     /// The screen point an interaction lands on (for the topmost-window check); nil for keys.
-    private func injectorProbePoint(_ event: InputEvent) -> CGPoint? {
-        guard let rect = currentSourceRect() else { return nil }
+    private func injectorProbePoint(_ event: InputEvent, in held: CGRect? = nil) -> CGPoint? {
+        guard let rect = held ?? currentSourceRect() else { return nil }
         switch event {
         case .pointer(_, let x, let y), .scroll(let x, let y, _, _), .scrollGesture(_, let x, let y):
             return InputLanding.point(x: x, y: y, in: rect, displayScale: streamDisplayScale)
@@ -3545,7 +3563,7 @@ package final class StreamCoordinator {
     }
 
     /// Whether this input must not reach the Mac because a 1Password prompt is not yet safely on the device.
-    private func promptHoldsInput(_ event: InputEvent, from device: KeyStrokes.Device) -> Bool {
+    private func promptHoldsInput(_ event: InputEvent, from device: KeyStrokes.Device, in held: CGRect? = nil) -> Bool {
         if promptSwitch != nil { return true }
         // The delay of the device that sent this, the longer one when its route is unknown.
         let away = routes[device]?.isAway ?? true
@@ -3561,19 +3579,32 @@ package final class StreamCoordinator {
         default: isPress = false; isKey = false
         }
         guard isPress || isKey else { return false }
-        let prompts = WindowCatalog.livePrompts().filter { $0.id != streamedPrompt }
+        let live = WindowCatalog.livePrompts()
+        notePrompts(live.map(\.id))
+        let prompts = live.filter { $0.id != streamedPrompt }
         guard !prompts.isEmpty else { return false }
+        return unseenPromptHolds(prompts, event: event, isPress: isPress, away: away, in: held)
+    }
+
+    /// On the Desktop, a prompt is in the picture once both it and this Desktop stream have run for the
+    /// delay, and only on the display the device shows. Any other source never shows it.
+    private func unseenPromptHolds(_ prompts: [(id: CGWindowID, frame: CGRect)], event: InputEvent?, isPress: Bool, away: Bool, in held: CGRect? = nil) -> Bool {
         let now = ProcessInfo.processInfo.systemUptime
-        for prompt in prompts where promptFirstSeen[prompt.id] == nil { promptFirstSeen[prompt.id] = now }
         let delay = away ? CatalogWindows.PromptFollow.awayArmDelay : CatalogWindows.PromptFollow.armDelay
-        // On the Desktop a prompt is in the picture once it has been open for the delay.
-        let unseen = prompts.filter { active != .desktop || now - (promptFirstSeen[$0.id] ?? now) < delay }
-        if isPress {
-            guard let point = injectorProbePoint(event) else { return false }
-            return unseen.contains { $0.frame.contains(point) }
+        let shown = active == .desktop ? currentSourceRect() : nil
+        let unseen = prompts.filter { prompt in
+            guard let shown, shown.intersects(prompt.frame) else { return true }
+            return now - max(promptFirstSeen[prompt.id] ?? now, sourceShownAt) < delay
         }
-        guard !unseen.isEmpty, let pid = Self.activePID(trustAppKit: appKitLoop) else { return false }
-        return NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.1password.1password"
+        guard isPress, let event else { return !unseen.isEmpty }
+        guard let point = injectorProbePoint(event, in: held) else { return false }
+        return unseen.contains { $0.frame.contains(point) }
+    }
+
+    private func notePrompts(_ ids: [CGWindowID]) {
+        let now = ProcessInfo.processInfo.systemUptime
+        promptFirstSeen = promptFirstSeen.filter { ids.contains($0.key) }
+        for id in ids where promptFirstSeen[id] == nil { promptFirstSeen[id] = now }
     }
 
     /// Looks for prompts once a second, with or without a device, and posts a Darwin notification for one
@@ -3594,8 +3625,7 @@ package final class StreamCoordinator {
     private func promptWatchTick() {
         let now = ProcessInfo.processInfo.systemUptime
         let prompts = WindowCatalog.livePrompts().map(\.id)
-        promptFirstSeen = promptFirstSeen.filter { prompts.contains($0.key) }
-        for id in prompts where promptFirstSeen[id] == nil { promptFirstSeen[id] = now }
+        notePrompts(prompts)
         guard !shuttingDown, !lockReading.locked,
               promptNotifier.shouldNotify(prompts: prompts, watching: catalog.clientCount > 0, now: now) else { return }
         let status = notify_post("sh.saqoo.sill.1password-prompt")

@@ -907,14 +907,15 @@ extension StreamClient {
     private func connectForApproval(_ url: URL) {
         guard url.host?.lowercased() == "approve",
               let name = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "mac" })?.value,
-              let mac = savedMacs.first(where: { $0.name == name && $0.revoked != true }) else {
-            status = "This notification names a Mac this device isn't paired with."
+              case let named = savedMacs.filter({ $0.name == name && $0.revoked != true }), named.count == 1,
+              let mac = named.first else {
+            status = "This notification doesn't name one Mac this device is paired with."
             return
         }
-        if connected, session?.macID == mac.macID { return }
-        if !connected, remoteDial != nil || connection != nil, hostName == displayName(mac.macID) { return }
-        if connected { disconnect() }
-        if let row = macs.first(where: { $0.macID == mac.macID && $0.route != .remote }) {
+        // A link never ends a session: any app can open it.
+        if connected { return }
+        if remoteDial != nil || connection != nil, hostName == displayName(mac.macID) { return }
+        if let row = macs.first(where: { $0.savedID == mac.macID && $0.route != .remote }) {
             connect(to: row)
         } else {
             reconnect = nil
