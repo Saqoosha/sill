@@ -87,6 +87,24 @@ enum CatalogWindows {
             && (300...600).contains(w.width) && (200...600).contains(w.height)
     }
 
+    /// When a prompt that no device is watching should send a notification.
+    struct PromptNotifier: Equatable {
+        /// Consecutive prompts (several Environments approved in a row) send one notification.
+        static let minimumGap = 15.0
+        private var seen: Set<UInt32> = []
+        private var lastSentAt: Double?
+
+        mutating func shouldNotify(prompts: [UInt32], watching: Bool, now: Double) -> Bool {
+            let current = Set(prompts)
+            let fresh = !current.subtracting(seen).isEmpty
+            seen = current
+            guard fresh, !watching else { return false }
+            if let lastSentAt, now - lastSentAt < Self.minimumGap { return false }
+            lastSentAt = now
+            return true
+        }
+    }
+
     /// 1Password mode: which source a device should show as approval prompts open and close.
     struct PromptFollow: Equatable {
         enum Source: Equatable { case none, desktop, window(UInt32) }
@@ -101,11 +119,12 @@ enum CatalogWindows {
         private(set) var back: Source?
         private(set) var dismissed: Set<UInt32> = []
         private var followedAt = 0.0
+        private var shownPrompt: UInt32?
         private var shownAt: Double?
 
         /// The source to switch to now, if any.
         mutating func observe(prompts: [UInt32], windows: [UInt32], active: Source, comesBack: UInt32?, now: Double) -> Source? {
-            streaming(active, now: now)
+            streaming(active, prompts: prompts, now: now)
             dismissed.formIntersection(prompts)
             if let p = prompt, prompts.contains(p) {
                 return active == .window(p) ? nil : .window(p)
@@ -114,8 +133,6 @@ enum CatalogWindows {
                 if prompt == nil { back = comesBack.map(Source.window) ?? active }
                 prompt = next
                 followedAt = now
-                shownAt = nil
-                streaming(active, now: now)
                 return active == .window(next) ? nil : .window(next)
             }
             guard prompt != nil else { return nil }
@@ -134,7 +151,6 @@ enum CatalogWindows {
             if case .window(let id) = source, dismissed.remove(id) != nil {
                 prompt = id
                 followedAt = now
-                shownAt = nil
                 return true
             }
             guard let p = prompt, source != .window(p) else { return true }
@@ -142,13 +158,13 @@ enum CatalogWindows {
             dismissed.insert(p)
             prompt = nil
             back = nil
-            shownAt = nil
             return true
         }
 
-        /// Notes what streams now, which starts or ends the arming delay.
-        mutating func streaming(_ active: Source, now: Double) {
-            if let p = prompt, active == .window(p) { shownAt = shownAt ?? now } else { shownAt = nil }
+        /// Notes what streams now. The arming delay starts when any prompt starts streaming, followed or picked.
+        mutating func streaming(_ active: Source, prompts: [UInt32], now: Double) {
+            guard case .window(let id) = active, prompts.contains(id) else { shownPrompt = nil; shownAt = nil; return }
+            if shownPrompt != id { shownPrompt = id; shownAt = now }
         }
 
         func armed(now: Double, away: Bool) -> Bool {

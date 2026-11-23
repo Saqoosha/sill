@@ -889,6 +889,7 @@ extension StreamClient {
     /// A sill://pair link from outside the app: shown for confirmation, never acted on by itself (a
     /// poster or a message could otherwise add a look-alike "Mac" that collects keystrokes).
     func handleOpenURL(_ url: URL) {
+        if url.scheme?.lowercased() == "sill-1p" { connectForApproval(url); return }
         guard url.scheme?.lowercased() == "sill" else { return }
         switch PairLink.parse(url.absoluteString) {
         case .success(let link):
@@ -899,6 +900,15 @@ extension StreamClient {
         case .failure:
             pairing = .failed(.notALink)
         }
+    }
+
+    /// A 1Password notification's tap: dials the Mac this device used last, which then shows its prompt.
+    /// It can reach only a Mac already paired, and sends no input.
+    private func connectForApproval(_ url: URL) {
+        guard url.host?.lowercased() == "approve", !connected,
+              let mac = savedMacs.max(by: { ($0.lastConnectedAt ?? .distantPast) < ($1.lastConnectedAt ?? .distantPast) }) else { return }
+        reconnect = nil
+        dialSaved(mac.macID, why: .tap)
     }
 
     /// Confirmed: to the row the ask reached when it names that key, else the home rows pinned to

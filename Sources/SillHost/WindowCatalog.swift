@@ -159,8 +159,23 @@ final class WindowCatalog {
     /// The genuine 1Password approval prompts on screen in the last look.
     private(set) var onePasswordPromptIDs: [CGWindowID] = []
 
+    /// The genuine prompts on screen now, from the window server. Needs no device and no Screen Recording.
+    nonisolated static func livePromptIDs() -> [CGWindowID] {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return [] }
+        return list.compactMap { info in
+            guard let id = info[kCGWindowNumber as String] as? CGWindowID,
+                  let pid = info[kCGWindowOwnerPID as String] as? pid_t,
+                  let layer = info[kCGWindowLayer as String] as? Int, layer == 101,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds) else { return nil }
+            let window = CatalogWindows.Window(title: nil, appName: nil, bundleID: NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
+                                               pid: pid, layer: layer, width: Double(frame.width), height: Double(frame.height))
+            return CatalogWindows.isOnePasswordPrompt(window) && isGenuineOnePassword(pid: pid) ? id : nil
+        }
+    }
+
     /// Whether the process is 1Password as signed by AgileBits (team 2BUA8C4S2C).
-    private static func isGenuineOnePassword(pid: pid_t) -> Bool {
+    nonisolated private static func isGenuineOnePassword(pid: pid_t) -> Bool {
         var code: SecCode?
         let attributes = [kSecGuestAttributePid: NSNumber(value: pid)] as CFDictionary
         guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess, let code else { return false }

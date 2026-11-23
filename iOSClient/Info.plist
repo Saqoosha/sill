@@ -40,6 +40,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>sill</string>
+				<string>sill-1p</string>
 			</array>
 		</dict>
 	</array>

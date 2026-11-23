@@ -868,6 +868,7 @@ package final class StreamCoordinator {
         // Show this account while another user is on the screen (docs/off-console-plan.md): one line, only when on.
         if config.offConsoleView { print(LockPolicy.offConsoleViewStartLine) }
         checkFirewall()                                         // at launch, beside the listener's own check
+        startPromptWatch()
         if !synthetic, promptForPermissions { InputInjector.ensureAccessibility() }   // prompts once; input is dropped silently without it
         if softwareOnly {
             // TEST ONLY: a gate that must never touch the Mac's one hardware encoder (Noah may be
@@ -1286,8 +1287,11 @@ package final class StreamCoordinator {
                 return
             }
             // A tap aimed at the picture before a prompt took over must not land on its Approve button.
-            let onPrompt = active == promptFollow.prompt.map(StreamSource.window)
-            if promptSwitch != nil || (onPrompt && !promptFollow.armed(now: CFAbsoluteTimeGetCurrent(), away: awayRunning))
+            var onPrompt = false
+            if case .window(let id) = active { onPrompt = catalog.onePasswordPromptIDs.contains(id) }
+            // The delay of the device that sent this, the longer one when its route is unknown.
+            let away = routes[device]?.isAway ?? true
+            if promptSwitch != nil || (onPrompt && !promptFollow.armed(now: CFAbsoluteTimeGetCurrent(), away: away))
                 || pressHitsUnseenPrompt(event) {
                 injector.stopRepeating()
                 if injector.isUpOfSomethingDown(event) { deliver(event, in: .null, from: device) }
@@ -1902,10 +1906,11 @@ package final class StreamCoordinator {
     /// device, or a pick made before the device heard of the close, can still let it land during
     /// a restart that follows the user's pick, and then it is queued like the user's own.
     private func handlePick(_ source: StreamSource) async {
+        let towardPrompt = promptFollow.prompt != nil       // read before `picked` can end the follow
         guard promptFollow.picked(Self.followSource(source), now: CFAbsoluteTimeGetCurrent()) else { return }
         if switching {
             // Queued only on the way to a prompt: on the way back, this is the device's automatic Desktop request.
-            if let r = restartOf ?? (promptFollow.prompt != nil ? promptSwitch : nil), source != r { pickArrivedWhileSwitching = source }
+            if let r = restartOf ?? (towardPrompt ? promptSwitch : nil), source != r { pickArrivedWhileSwitching = source }
             return
         }
         await select(source, bringForward: true)
@@ -1941,7 +1946,7 @@ package final class StreamCoordinator {
         defer {
             switching = false
             restartOf = nil
-            promptFollow.streaming(Self.followSource(active), now: CFAbsoluteTimeGetCurrent())
+            promptFollow.streaming(Self.followSource(active), prompts: catalog.onePasswordPromptIDs, now: CFAbsoluteTimeGetCurrent())
             var pick = pickArrivedWhileSwitching
             pickArrivedWhileSwitching = nil
             // Requests that arrived mid-switch, applied now that `switching` is clear again (every
@@ -2527,6 +2532,9 @@ package final class StreamCoordinator {
     private var promptFollow = CatalogWindows.PromptFollow()
     private var promptSwitch: StreamSource?
     private var promptRestartAt: CFAbsoluteTime = 0
+    private var promptNotifier = CatalogWindows.PromptNotifier()
+    private var promptWatch: Task<Void, Never>?
+    private var promptWatchActivity: NSObjectProtocol?
     private var lastRaiseCheck: CFAbsoluteTime = 0
     private var lastActivationAt: CFAbsoluteTime = 0
     /// Input held for an activation, replayed in order once the app is up, each with the device that
@@ -3546,6 +3554,35 @@ package final class StreamCoordinator {
             let window = CatalogWindows.Window(title: nil, appName: nil, bundleID: NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
                                                pid: pid, layer: layer, width: Double(frame.width), height: Double(frame.height))
             return CatalogWindows.isOnePasswordPrompt(window)
+        }
+    }
+
+    /// Looks for prompts once a second, with or without a device, and runs the notification script for one nobody watches.
+    private func startPromptWatch() {
+        let script = NSHomeDirectory() + "/.claude/scripts/1p-approval-page.sh"
+        guard !synthetic, promptWatch == nil, FileManager.default.isExecutableFile(atPath: script) else { return }
+        promptWatchActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                                    reason: "Watching for 1Password approval prompts")
+        print("1Password mode: watching for prompts to notify about.")
+        promptWatch = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                self?.promptWatchTick(script: script)
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func promptWatchTick(script: String) {
+        guard !shuttingDown, !lockReading.locked else { return }
+        guard promptNotifier.shouldNotify(prompts: WindowCatalog.livePromptIDs(), watching: catalog.clientCount > 0,
+                                          now: CFAbsoluteTimeGetCurrent()) else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: script)
+        do {
+            try process.run()
+            print("1Password mode: notification requested.")
+        } catch {
+            print("1Password mode: could not run the notification script: \(error.localizedDescription)")
         }
     }
 

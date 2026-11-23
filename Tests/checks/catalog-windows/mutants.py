@@ -64,7 +64,15 @@ MUTANTS = [
     ("the automatic Desktop replaces the prompt", "if source == .desktop, now - followedAt < Self.automaticDesktopWindow { return false }", ""),
     ("a person's pick keeps the way back", "prompt = nil\n            back = nil", "prompt = nil"),
     ("armed at once", "return now - shownAt >= (away ? Self.awayArmDelay : Self.armDelay)", "return true"),
-    ("a look restarts the delay", "shownAt = shownAt ?? now", "shownAt = now"),
+    ("a look restarts the delay", "if shownPrompt != id { shownPrompt = id; shownAt = now }", "shownPrompt = id; shownAt = now"),
+    ("another prompt keeps the first delay", "if shownPrompt != id { shownPrompt = id; shownAt = now }", "if shownAt == nil { shownPrompt = id; shownAt = now }"),
+    ("leaving a prompt keeps its delay", "else { shownPrompt = nil; shownAt = nil; return }", "else { return }"),
+    ("a notification at every look", "let fresh = !current.subtracting(seen).isEmpty", "let fresh = !current.isEmpty"),
+    ("a notification while a device watches", "guard fresh, !watching else", "guard fresh else"),
+    ("no gap between notifications", "if let lastSentAt, now - lastSentAt < Self.minimumGap { return false }", ""),
+    ("the gap's end excluded", "now - lastSentAt < Self.minimumGap", "now - lastSentAt <= Self.minimumGap"),
+    ("a closed prompt stays seen", "seen = current\n", "seen.formUnion(current)\n"),
+    ("any window starts the delay", "guard case .window(let id) = active, prompts.contains(id) else", "guard case .window(let id) = active else"),
     ("the last device leaving keeps the state", "mutating func devicesLeft() { self = PromptFollow() }", "mutating func devicesLeft() {}"),
 ]
 caught = 0
