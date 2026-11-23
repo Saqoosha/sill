@@ -902,13 +902,25 @@ extension StreamClient {
         }
     }
 
-    /// A 1Password notification's tap: dials the Mac this device used last, which then shows its prompt.
-    /// It can reach only a Mac already paired, and sends no input.
+    /// A 1Password notification's tap: connects to the paired Mac it names, which then shows its prompt.
+    /// It sends no input, and prefers the home row over the remote door.
     private func connectForApproval(_ url: URL) {
-        guard url.host?.lowercased() == "approve", !connected,
-              let mac = savedMacs.max(by: { ($0.lastConnectedAt ?? .distantPast) < ($1.lastConnectedAt ?? .distantPast) }) else { return }
-        reconnect = nil
-        dialSaved(mac.macID, why: .tap)
+        guard url.host?.lowercased() == "approve",
+              let name = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "mac" })?.value,
+              let mac = savedMacs.first(where: { $0.name == name && $0.revoked != true }) else {
+            status = "This notification names a Mac this device isn't paired with."
+            return
+        }
+        if connected, session?.macID == mac.macID { return }
+        if !connected, remoteDial != nil || connection != nil, hostName == displayName(mac.macID) { return }
+        if connected { disconnect() }
+        if let row = macs.first(where: { $0.macID == mac.macID && $0.route != .remote }) {
+            connect(to: row)
+        } else {
+            reconnect = nil
+            cancelHomeAsk()
+            dialSaved(mac.macID, why: .tap)
+        }
     }
 
     /// Confirmed: to the row the ask reached when it names that key, else the home rows pinned to

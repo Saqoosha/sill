@@ -286,12 +286,13 @@ check(!n.shouldNotify(prompts: [50], watching: false, now: 100), "the same promp
 n = CatalogWindows.PromptNotifier()
 _ = n.shouldNotify(prompts: [50], watching: false, now: 100)
 check(!n.shouldNotify(prompts: [60], watching: false, now: 114.9), "the next prompt within 15 s: no second notification")
-check(n.shouldNotify(prompts: [70], watching: false, now: 115), "the next prompt after 15 s")
+check(n.shouldNotify(prompts: [60], watching: false, now: 115), "a prompt held by the gap is sent when it ends")
+check(!n.shouldNotify(prompts: [60], watching: false, now: 200), "and only once")
 n = CatalogWindows.PromptNotifier()
 check(!n.shouldNotify(prompts: [50], watching: true, now: 1), "a device is watching: no notification")
-check(!n.shouldNotify(prompts: [50], watching: false, now: 2), "a prompt seen while watched is not sent after")
+check(n.shouldNotify(prompts: [50], watching: false, now: 2), "the device left with the prompt open: it is sent")
 _ = n.shouldNotify(prompts: [], watching: false, now: 3)
-check(n.shouldNotify(prompts: [50], watching: false, now: 4), "the same ID after it closed is a new prompt")
+check(n.shouldNotify(prompts: [50], watching: false, now: 18), "the same ID after it closed is a new prompt")
 
 print("catalog-windows: \(cases) checks, \(failures) failed")
 if failures > 0 { exit(1) }

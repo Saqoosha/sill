@@ -91,16 +91,17 @@ enum CatalogWindows {
     struct PromptNotifier: Equatable {
         /// Consecutive prompts (several Environments approved in a row) send one notification.
         static let minimumGap = 15.0
-        private var seen: Set<UInt32> = []
+        private var notified: Set<UInt32> = []
         private var lastSentAt: Double?
 
+        /// A prompt stays pending while a device watches or the gap runs, so it is sent once either ends.
         mutating func shouldNotify(prompts: [UInt32], watching: Bool, now: Double) -> Bool {
             let current = Set(prompts)
-            let fresh = !current.subtracting(seen).isEmpty
-            seen = current
-            guard fresh, !watching else { return false }
+            notified.formIntersection(current)
+            guard !current.subtracting(notified).isEmpty, !watching else { return false }
             if let lastSentAt, now - lastSentAt < Self.minimumGap { return false }
             lastSentAt = now
+            notified = current
             return true
         }
     }
