@@ -889,6 +889,7 @@ extension StreamClient {
     /// A sill://pair link from outside the app: shown for confirmation, never acted on by itself (a
     /// poster or a message could otherwise add a look-alike "Mac" that collects keystrokes).
     func handleOpenURL(_ url: URL) {
+        if url.scheme?.lowercased() == "sill-1p" { connectForApproval(url); return }
         guard url.scheme?.lowercased() == "sill" else { return }
         switch PairLink.parse(url.absoluteString) {
         case .success(let link):
@@ -898,6 +899,28 @@ extension StreamClient {
             #endif
         case .failure:
             pairing = .failed(.notALink)
+        }
+    }
+
+    /// A 1Password notification's tap: connects to the paired Mac it names, which then shows its prompt.
+    /// It sends no input, and prefers the home row over the remote door.
+    private func connectForApproval(_ url: URL) {
+        guard url.host?.lowercased() == "approve",
+              let name = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "mac" })?.value,
+              case let named = savedMacs.filter({ $0.name == name && $0.revoked != true }), named.count == 1,
+              let mac = named.first else {
+            status = "This notification doesn't name one Mac this device is paired with."
+            return
+        }
+        // A link never ends a session: any app can open it.
+        if connected { return }
+        if remoteDial != nil || connection != nil, hostName == displayName(mac.macID) { return }
+        if let row = macs.first(where: { $0.savedID == mac.macID && $0.route != .remote }) {
+            connect(to: row)
+        } else {
+            reconnect = nil
+            cancelHomeAsk()
+            dialSaved(mac.macID, why: .tap)
         }
     }
 

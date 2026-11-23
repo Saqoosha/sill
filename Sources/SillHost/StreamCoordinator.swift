@@ -3,6 +3,7 @@ import AppKit
 import Network
 import ScreenCaptureKit
 import StreamProtocol
+import notify
 
 /// Owns the pipeline for the life of the process and points it at whatever source the client
 /// picks. Threading: this class is main-actor; frames flow capture queue → VT thread → network
@@ -443,6 +444,7 @@ package final class StreamCoordinator {
         }
         // The test pattern is for test clients, not devices.
         server = try StreamServer(advertise: !synthetic, home: home, testHooks: testHooks)
+        watchesPrompts = !testHooks && !synthetic          // Sill.app alone: the CLI's stdout stays as it was
         server.macName = macName                           // the update goodbye names this Mac (DeviceGate)
         TestHooks.reportIgnored(testHost: server.isTestHost)
         // A host that does not advertise, `--synthetic` in the CLI and in the app alike (as
@@ -868,6 +870,7 @@ package final class StreamCoordinator {
         // Show this account while another user is on the screen (docs/off-console-plan.md): one line, only when on.
         if config.offConsoleView { print(LockPolicy.offConsoleViewStartLine) }
         checkFirewall()                                         // at launch, beside the listener's own check
+        startPromptWatch()
         if !synthetic, promptForPermissions { InputInjector.ensureAccessibility() }   // prompts once; input is dropped silently without it
         if softwareOnly {
             // TEST ONLY: a gate that must never touch the Mac's one hardware encoder (Noah may be
@@ -1286,9 +1289,7 @@ package final class StreamCoordinator {
                 return
             }
             // A tap aimed at the picture before a prompt took over must not land on its Approve button.
-            let onPrompt = active == promptFollow.prompt.map(StreamSource.window)
-            if promptSwitch != nil || (onPrompt && !promptFollow.armed(now: CFAbsoluteTimeGetCurrent(), away: awayRunning))
-                || pressHitsUnseenPrompt(event) {
+            if promptHoldsInput(event, from: device) {
                 injector.stopRepeating()
                 if injector.isUpOfSomethingDown(event) { deliver(event, in: .null, from: device) }
                 return
@@ -1902,10 +1903,11 @@ package final class StreamCoordinator {
     /// device, or a pick made before the device heard of the close, can still let it land during
     /// a restart that follows the user's pick, and then it is queued like the user's own.
     private func handlePick(_ source: StreamSource) async {
+        let towardPrompt = promptFollow.prompt != nil       // read before `picked` can end the follow
         guard promptFollow.picked(Self.followSource(source), now: CFAbsoluteTimeGetCurrent()) else { return }
         if switching {
             // Queued only on the way to a prompt: on the way back, this is the device's automatic Desktop request.
-            if let r = restartOf ?? (promptFollow.prompt != nil ? promptSwitch : nil), source != r { pickArrivedWhileSwitching = source }
+            if let r = restartOf ?? (towardPrompt ? promptSwitch : nil), source != r { pickArrivedWhileSwitching = source }
             return
         }
         await select(source, bringForward: true)
@@ -1936,12 +1938,16 @@ package final class StreamCoordinator {
         case .stay: return
         }
         switching = true
+        let sourceBeforeSwitch = active
         if source != active { missingPolls = 0 }    // a window's looks off the list are its own
         restartOf = (source == active && source != .none) ? source : nil
         defer {
             switching = false
             restartOf = nil
-            promptFollow.streaming(Self.followSource(active), now: CFAbsoluteTimeGetCurrent())
+            promptFollow.streaming(Self.followSource(active), prompts: catalog.onePasswordPromptIDs, now: CFAbsoluteTimeGetCurrent())
+            if active != sourceBeforeSwitch { sourceShownAt = ProcessInfo.processInfo.systemUptime }
+            // A prompt seen during this switch is shown now, not at the next poll.
+            if promptSwitch == nil, !catalog.onePasswordPromptIDs.isEmpty { Task { @MainActor in await self.followOnePasswordPrompt() } }
             var pick = pickArrivedWhileSwitching
             pickArrivedWhileSwitching = nil
             // Requests that arrived mid-switch, applied now that `switching` is clear again (every
@@ -2527,6 +2533,12 @@ package final class StreamCoordinator {
     private var promptFollow = CatalogWindows.PromptFollow()
     private var promptSwitch: StreamSource?
     private var promptRestartAt: CFAbsoluteTime = 0
+    private var promptNotifier = CatalogWindows.PromptNotifier()
+    private var promptWatch: Task<Void, Never>?
+    private var promptWatchActivity: NSObjectProtocol?
+    private var promptFirstSeen: [CGWindowID: TimeInterval] = [:]
+    private var sourceShownAt: TimeInterval = 0
+    private var watchesPrompts = false
     private var lastRaiseCheck: CFAbsoluteTime = 0
     private var lastActivationAt: CFAbsoluteTime = 0
     /// Input held for an activation, replayed in order once the app is up, each with the device that
@@ -2562,6 +2574,12 @@ package final class StreamCoordinator {
                 if gone(device) || lockReading.locked {
                     if injector.releasesWhatItHolds(event, from: device) { injector.apply(event, in: .null, from: device) }
                     else { Stats.shared.bump(gone(device) ? "in.revoked" : "in.locked") }
+                    continue
+                }
+                // A prompt can open during the hold: judged again, where the press would land.
+                if promptHoldsInput(event, from: device, in: rect) {
+                    injector.stopRepeating()
+                    if injector.isUpOfSomethingDown(event) { injector.apply(event, in: .null, from: device) }
                     continue
                 }
                 logClick(event, in: rect); injector.apply(event, in: rect, from: device)
@@ -2640,9 +2658,21 @@ package final class StreamCoordinator {
     /// rectangle cannot be read: the repeat stops), held while input waits for an app's activation (a
     /// repeat must not go out ahead of it), else on the source.
     private func keyRepeatLanding() -> KeyRepeat.Landing {
-        guard currentSourceRect() != nil else { return .nowhere }
+        guard currentSourceRect() != nil, !promptStopsKeyRepeat() else { return .nowhere }
         if !heldInput.isEmpty || CFAbsoluteTimeGetCurrent() < holdUntil { return .held }
         return .lands
+    }
+
+    /// A held Return must not repeat into a prompt that opened after it went down.
+    private func promptStopsKeyRepeat() -> Bool {
+        if promptSwitch != nil { return true }
+        var streamedPrompt: CGWindowID?
+        if case .window(let id) = active, catalog.onePasswordPromptIDs.contains(id) { streamedPrompt = id }
+        if streamedPrompt != nil, !promptFollow.armed(now: CFAbsoluteTimeGetCurrent(), away: true) { return true }
+        let live = WindowCatalog.livePrompts()
+        notePrompts(live.map(\.id))
+        let prompts = live.filter { $0.id != streamedPrompt }
+        return !prompts.isEmpty && unseenPromptHolds(prompts, event: nil, isPress: false, away: true)
     }
 
     private func raiseIfInteracting(_ event: InputEvent) {
@@ -2771,8 +2801,8 @@ package final class StreamCoordinator {
     }
 
     /// The screen point an interaction lands on (for the topmost-window check); nil for keys.
-    private func injectorProbePoint(_ event: InputEvent) -> CGPoint? {
-        guard let rect = currentSourceRect() else { return nil }
+    private func injectorProbePoint(_ event: InputEvent, in held: CGRect? = nil) -> CGPoint? {
+        guard let rect = held ?? currentSourceRect() else { return nil }
         switch event {
         case .pointer(_, let x, let y), .scroll(let x, let y, _, _), .scrollGesture(_, let x, let y):
             return InputLanding.point(x: x, y: y, in: rect, displayScale: streamDisplayScale)
@@ -3532,21 +3562,74 @@ package final class StreamCoordinator {
         return true
     }
 
-    /// A click on a window source that would land on a 1Password prompt the device cannot see in that picture.
-    private func pressHitsUnseenPrompt(_ event: InputEvent) -> Bool {
-        guard case .window(let streamed) = active, case .pointer(let action, _, _) = event,
-              action == .leftDown || action == .rightDown, let point = injectorProbePoint(event),
-              let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return false }
-        return list.contains { info in
-            guard let id = info[kCGWindowNumber as String] as? CGWindowID, id != streamed,
-                  let pid = info[kCGWindowOwnerPID as String] as? pid_t,
-                  let layer = info[kCGWindowLayer as String] as? Int,
-                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
-                  let frame = CGRect(dictionaryRepresentation: bounds), frame.contains(point) else { return false }
-            let window = CatalogWindows.Window(title: nil, appName: nil, bundleID: NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
-                                               pid: pid, layer: layer, width: Double(frame.width), height: Double(frame.height))
-            return CatalogWindows.isOnePasswordPrompt(window)
+    /// Whether this input must not reach the Mac because a 1Password prompt is not yet safely on the device.
+    private func promptHoldsInput(_ event: InputEvent, from device: KeyStrokes.Device, in held: CGRect? = nil) -> Bool {
+        if promptSwitch != nil { return true }
+        // The delay of the device that sent this, the longer one when its route is unknown.
+        let away = routes[device]?.isAway ?? true
+        var streamedPrompt: CGWindowID?
+        if case .window(let id) = active, catalog.onePasswordPromptIDs.contains(id) { streamedPrompt = id }
+        if streamedPrompt != nil, !promptFollow.armed(now: CFAbsoluteTimeGetCurrent(), away: away) { return true }
+
+        let isPress: Bool, isKey: Bool
+        switch event {
+        case .pointer(let action, _, _): isPress = action == .leftDown || action == .rightDown; isKey = false
+        case .key(_, let down, _): isPress = false; isKey = down
+        case .text: isPress = false; isKey = true
+        default: isPress = false; isKey = false
         }
+        guard isPress || isKey else { return false }
+        let live = WindowCatalog.livePrompts()
+        notePrompts(live.map(\.id))
+        let prompts = live.filter { $0.id != streamedPrompt }
+        guard !prompts.isEmpty else { return false }
+        return unseenPromptHolds(prompts, event: event, isPress: isPress, away: away, in: held)
+    }
+
+    /// On the Desktop, a prompt is in the picture once both it and this Desktop stream have run for the
+    /// delay, and only on the display the device shows. Any other source never shows it.
+    private func unseenPromptHolds(_ prompts: [(id: CGWindowID, frame: CGRect)], event: InputEvent?, isPress: Bool, away: Bool, in held: CGRect? = nil) -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        let delay = away ? CatalogWindows.PromptFollow.awayArmDelay : CatalogWindows.PromptFollow.armDelay
+        let shown = active == .desktop ? currentSourceRect() : nil
+        let unseen = prompts.filter { prompt in
+            guard let shown, shown.intersects(prompt.frame) else { return true }
+            return now - max(promptFirstSeen[prompt.id] ?? now, sourceShownAt) < delay
+        }
+        guard isPress, let event else { return !unseen.isEmpty }
+        guard let point = injectorProbePoint(event, in: held) else { return false }
+        return unseen.contains { $0.frame.contains(point) }
+    }
+
+    private func notePrompts(_ ids: [CGWindowID]) {
+        let now = ProcessInfo.processInfo.systemUptime
+        promptFirstSeen = promptFirstSeen.filter { ids.contains($0.key) }
+        for id in ids where promptFirstSeen[id] == nil { promptFirstSeen[id] = now }
+    }
+
+    /// Looks for prompts once a second, with or without a device, and posts a Darwin notification for one
+    /// nobody watches. A separate LaunchAgent sends the push, so Sill's grants run no outside code.
+    private func startPromptWatch() {
+        guard watchesPrompts, promptWatch == nil else { return }
+        promptWatchActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                                    reason: "Watching for 1Password approval prompts")
+        print("1Password mode: watching for prompts to notify about.")
+        promptWatch = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                self?.promptWatchTick()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func promptWatchTick() {
+        let now = ProcessInfo.processInfo.systemUptime
+        let prompts = WindowCatalog.livePrompts().map(\.id)
+        notePrompts(prompts)
+        guard !shuttingDown, !lockReading.locked,
+              promptNotifier.shouldNotify(prompts: prompts, watching: catalog.clientCount > 0, now: now) else { return }
+        let status = notify_post("sh.saqoo.sill.1password-prompt")
+        print(status == 0 ? "1Password mode: notification posted." : "1Password mode: could not post the notification (\(status)).")
     }
 
     private static func followSource(_ source: StreamSource) -> CatalogWindows.PromptFollow.Source {
