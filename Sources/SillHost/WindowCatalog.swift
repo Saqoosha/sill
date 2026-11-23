@@ -183,6 +183,7 @@ final class WindowCatalog {
 
     /// Window list and thumbnails, while a client is connected.
     static let pollInterval: Duration = .seconds(2)
+    static let pollSeconds: CFAbsoluteTime = 2
     /// A window whose `WindowInfo` (title, app, size) has not changed since its last thumbnail,
     /// and which is not the active source, is re-shot only this often. Most windows on a Mac are
     /// static; re-screenshotting them every pass is the bulk of the catalog's cost in use.

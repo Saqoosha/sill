@@ -95,23 +95,24 @@ enum CatalogWindows {
         static let automaticDesktopWindow = 3.0
         /// Presses are dropped this long after a prompt shows, so a tap aimed at the old picture cannot approve it.
         static let armDelay = 0.75
+        static let awayArmDelay = 2.0
 
         private(set) var prompt: UInt32?
         private(set) var back: Source?
-        private(set) var dismissed = false
+        private(set) var dismissed: Set<UInt32> = []
         private var followedAt = 0.0
         private var shownAt: Double?
 
         /// The source to switch to now, if any.
         mutating func observe(prompts: [UInt32], windows: [UInt32], active: Source, comesBack: UInt32?, now: Double) -> Source? {
             streaming(active, now: now)
+            dismissed.formIntersection(prompts)
             if let p = prompt, prompts.contains(p) {
-                return dismissed || active == .window(p) ? nil : .window(p)
+                return active == .window(p) ? nil : .window(p)
             }
-            if let next = prompts.min() {
-                if prompt == nil || dismissed { back = comesBack.map(Source.window) ?? active }
+            if let next = prompts.filter({ !dismissed.contains($0) }).min() {
+                if prompt == nil { back = comesBack.map(Source.window) ?? active }
                 prompt = next
-                dismissed = false
                 followedAt = now
                 shownAt = nil
                 streaming(active, now: now)
@@ -119,7 +120,9 @@ enum CatalogWindows {
             }
             guard prompt != nil else { return nil }
             let target = back
+            let stillDismissed = dismissed
             self = PromptFollow()
+            dismissed = stillDismissed
             guard let target else { return nil }
             let live: Source
             if case .window(let id) = target, windows.contains(id) { live = target } else { live = .desktop }
@@ -128,11 +131,18 @@ enum CatalogWindows {
 
         /// A device's pick. False when it is the automatic Desktop request and must not replace the prompt.
         mutating func picked(_ source: Source, now: Double) -> Bool {
-            guard let p = prompt else { return true }
-            if source == .window(p) { dismissed = false; return true }
-            if source == .desktop, !dismissed, now - followedAt < Self.automaticDesktopWindow { return false }
-            dismissed = true
+            if case .window(let id) = source, dismissed.remove(id) != nil {
+                prompt = id
+                followedAt = now
+                shownAt = nil
+                return true
+            }
+            guard let p = prompt, source != .window(p) else { return true }
+            if source == .desktop, now - followedAt < Self.automaticDesktopWindow { return false }
+            dismissed.insert(p)
+            prompt = nil
             back = nil
+            shownAt = nil
             return true
         }
 
@@ -141,9 +151,9 @@ enum CatalogWindows {
             if let p = prompt, active == .window(p) { shownAt = shownAt ?? now } else { shownAt = nil }
         }
 
-        func armed(now: Double) -> Bool {
+        func armed(now: Double, away: Bool) -> Bool {
             guard let shownAt else { return false }
-            return now - shownAt >= Self.armDelay
+            return now - shownAt >= (away ? Self.awayArmDelay : Self.armDelay)
         }
 
         mutating func devicesLeft() { self = PromptFollow() }
