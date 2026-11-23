@@ -156,8 +156,19 @@ final class WindowCatalog {
     /// on-screen there (unverified), it is fetched from the full window list so its tile stays in
     /// the client's bar and the coordinator can still find it.
     var stagedWindowID: CGWindowID?
-    /// The 1Password approval prompt on screen in the last look, if any (CatalogWindows.isOnePasswordPrompt).
-    private(set) var onePasswordPromptID: CGWindowID?
+    /// The genuine 1Password approval prompts on screen in the last look.
+    private(set) var onePasswordPromptIDs: [CGWindowID] = []
+
+    /// Whether the process is 1Password as signed by AgileBits (team 2BUA8C4S2C).
+    private static func isGenuineOnePassword(pid: pid_t) -> Bool {
+        var code: SecCode?
+        let attributes = [kSecGuestAttributePid: NSNumber(value: pid)] as CFDictionary
+        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess, let code else { return false }
+        let text = "anchor apple generic and identifier \"com.1password.1password\" and certificate leaf[subject.OU] = \"2BUA8C4S2C\""
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess, let requirement else { return false }
+        return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
+    }
 
     /// A window in the plain values CatalogWindows judges it by.
     static func plain(_ w: SCWindow) -> CatalogWindows.Window {
@@ -342,8 +353,11 @@ final class WindowCatalog {
         // An app's own windows only (CatalogWindows): no widgets, wallpaper or backstop, nothing of
         // Sill's, and no helper's window (LayerProbeParent, macOS's own interface, a tool's overlay).
         let plain = content.windows.map(Self.plain)
-        onePasswordPromptID = zip(content.windows, plain).first { CatalogWindows.isOnePasswordPrompt($1) }?.0.windowID
-        var visible = zip(content.windows, plain).filter { CatalogWindows.lists($1, ownPID: Self.ownPID) }.map(\.0)
+        onePasswordPromptIDs = zip(content.windows, plain)
+            .filter { CatalogWindows.isOnePasswordPrompt($1) && Self.isGenuineOnePassword(pid: $1.pid) }.map(\.0.windowID)
+        let prompts = Set(onePasswordPromptIDs)
+        var visible = zip(content.windows, plain)
+            .filter { CatalogWindows.lists($1, ownPID: Self.ownPID) || prompts.contains($0.windowID) }.map(\.0)
         for line in CatalogWindows.leftOutLines(plain, ownPID: Self.ownPID, named: &leftOutNamed) { print(line) }
         if let pinned, !visible.contains(where: { $0.windowID == pinned.windowID }) { visible.append(pinned) }
         // The system's order is not front-to-back and shuffles between polls. The brief wants a

@@ -77,14 +77,76 @@ enum CatalogWindows {
 
     /// Whether a device's window strip gets this window.
     static func lists(_ w: Window, ownPID: Int32) -> Bool {
-        (isAppWindow(w, ownPID: ownPID) && helper(w) == nil) || isOnePasswordPrompt(w)
+        isAppWindow(w, ownPID: ownPID) && helper(w) == nil
     }
 
-    /// 1Password's approval prompt: a floating panel on layer 101, measured at 400 × 325 points on
-    /// 1Password 8.12.44. The size bounds keep its larger floating windows out.
+    /// The shape of 1Password's approval prompt: a floating panel on layer 101, measured at 400 × 325
+    /// and 400 × 346 points on 1Password 8.12.44. WindowCatalog also checks the owner's signature.
     static func isOnePasswordPrompt(_ w: Window) -> Bool {
         w.bundleID == "com.1password.1password" && w.layer == 101
             && (300...600).contains(w.width) && (200...600).contains(w.height)
+    }
+
+    /// 1Password mode: which source a device should show as approval prompts open and close.
+    struct PromptFollow: Equatable {
+        enum Source: Equatable { case none, desktop, window(UInt32) }
+
+        /// A Desktop pick this soon after a follow is taken as the device's automatic one.
+        static let automaticDesktopWindow = 3.0
+        /// Presses are dropped this long after a prompt shows, so a tap aimed at the old picture cannot approve it.
+        static let armDelay = 0.75
+
+        private(set) var prompt: UInt32?
+        private(set) var back: Source?
+        private(set) var dismissed = false
+        private var followedAt = 0.0
+        private var shownAt: Double?
+
+        /// The source to switch to now, if any.
+        mutating func observe(prompts: [UInt32], windows: [UInt32], active: Source, comesBack: UInt32?, now: Double) -> Source? {
+            streaming(active, now: now)
+            if let p = prompt, prompts.contains(p) {
+                return dismissed || active == .window(p) ? nil : .window(p)
+            }
+            if let next = prompts.min() {
+                if prompt == nil || dismissed { back = comesBack.map(Source.window) ?? active }
+                prompt = next
+                dismissed = false
+                followedAt = now
+                shownAt = nil
+                streaming(active, now: now)
+                return active == .window(next) ? nil : .window(next)
+            }
+            guard prompt != nil else { return nil }
+            let target = back
+            self = PromptFollow()
+            guard let target else { return nil }
+            let live: Source
+            if case .window(let id) = target, windows.contains(id) { live = target } else { live = .desktop }
+            return live == active ? nil : live
+        }
+
+        /// A device's pick. False when it is the automatic Desktop request and must not replace the prompt.
+        mutating func picked(_ source: Source, now: Double) -> Bool {
+            guard let p = prompt else { return true }
+            if source == .window(p) { dismissed = false; return true }
+            if source == .desktop, !dismissed, now - followedAt < Self.automaticDesktopWindow { return false }
+            dismissed = true
+            back = nil
+            return true
+        }
+
+        /// Notes what streams now, which starts or ends the arming delay.
+        mutating func streaming(_ active: Source, now: Double) {
+            if let p = prompt, active == .window(p) { shownAt = shownAt ?? now } else { shownAt = nil }
+        }
+
+        func armed(now: Double) -> Bool {
+            guard let shownAt else { return false }
+            return now - shownAt >= Self.armDelay
+        }
+
+        mutating func devicesLeft() { self = PromptFollow() }
     }
 
     /// The lines the catalog prints for the windows one look left out that the filter before issue
