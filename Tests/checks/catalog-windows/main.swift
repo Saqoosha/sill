@@ -200,5 +200,76 @@ for _ in 0..<20_000 {
 }
 check(disagree == 0, "20,000 seeded random windows: the rule and its words agree (\(disagree) disagreements)")
 
+// MARK: 1Password mode: the prompt's shape
+
+let onePassword = "com.1password.1password"
+func promptShape(bundle: String? = onePassword, layer: Int = 101, _ width: Double = 400, _ height: Double = 325) -> Bool {
+    CatalogWindows.isOnePasswordPrompt(win("1Password", app: "1Password", bundle: bundle, layer: layer, width, height))
+}
+check(promptShape(), "the measured prompt, 400 × 325 on layer 101")
+check(promptShape(400, 346), "the measured prompt, 400 × 346")
+check(!lists(win("1Password", app: "1Password", bundle: onePassword, layer: 101, 400, 325)), "the shape alone never lists it: the signature decides")
+check(!promptShape(bundle: "com.example.fake"), "another app's panel of that shape")
+check(!promptShape(bundle: onePassword + ".helper"), "a longer bundle identifier")
+check(!promptShape(layer: 100) && !promptShape(layer: 102) && !promptShape(layer: 0), "another layer")
+check(!promptShape(299, 325) && promptShape(300, 325) && promptShape(600, 325) && !promptShape(601, 325), "the width's bounds")
+check(!promptShape(400, 199) && promptShape(400, 200) && promptShape(400, 600) && !promptShape(400, 601), "the height's bounds")
+
+// MARK: 1Password mode: following prompts
+
+typealias Follow = CatalogWindows.PromptFollow
+typealias S = Follow.Source
+func look(_ f: inout Follow, _ prompts: [UInt32], active: S, windows: [UInt32] = [7, 8], comesBack: UInt32? = nil, at now: Double = 10) -> S? {
+    f.observe(prompts: prompts, windows: windows, active: active, comesBack: comesBack, now: now)
+}
+var f = Follow()
+check(look(&f, [], active: .window(7)) == nil, "no prompt: nothing changes")
+check(look(&f, [50], active: .window(7)) == .window(50) && f.back == .window(7), "a prompt is followed and the source kept")
+check(look(&f, [50], active: .none, at: 12) == .window(50), "a failed switch is tried again while it is open")
+check(look(&f, [50], active: .window(50)) == nil, "showing it: nothing changes")
+check(look(&f, [], active: .window(50)) == .window(7) && f.prompt == nil, "closed: back to the window")
+
+f = Follow(); _ = look(&f, [50], active: .window(7))
+check(look(&f, [], active: .none) == .window(7), "closed during the switch: back to the window")
+f = Follow(); _ = look(&f, [50], active: .window(7))
+check(look(&f, [], active: .window(50), windows: [8]) == .desktop, "the window closed meanwhile: the Desktop")
+f = Follow(); _ = look(&f, [50], active: .none)
+check(look(&f, [], active: .window(50)) == .desktop, "nothing streamed before: the Desktop")
+f = Follow(); _ = look(&f, [50], active: .window(7))
+check(look(&f, [], active: .window(7)) == nil, "already back: no restart")
+
+f = Follow(); _ = look(&f, [60, 50], active: .window(7))
+check(f.prompt == 50, "two prompts: the lowest ID")
+check(look(&f, [50, 60], active: .window(50)) == nil, "their order changing keeps the one shown")
+check(look(&f, [60], active: .window(50)) == .window(60) && f.back == .window(7), "the next prompt keeps the first source")
+
+f = Follow(); _ = look(&f, [50], active: .desktop, comesBack: 7)
+check(f.back == .window(7), "after an unlock: the window the lock would restore")
+
+f = Follow(); _ = look(&f, [50], active: .window(7), at: 10)
+check(!f.picked(.desktop, now: 12.9) && f.back == .window(7), "the device's automatic Desktop request does not replace the prompt")
+check(f.picked(.window(50), now: 13) && f.back == .window(7), "picking the prompt keeps the way back")
+check(f.picked(.desktop, now: 13) && f.back == nil && f.dismissed == [50], "a Desktop pick after the window is the person's")
+check(look(&f, [50], active: .desktop) == nil, "a dismissed prompt is not followed again")
+check(look(&f, [], active: .desktop) == nil && f.prompt == nil && f.dismissed.isEmpty, "and its close changes nothing")
+f = Follow(); _ = look(&f, [50], active: .window(7), at: 10)
+check(f.picked(.window(8), now: 10.5) && f.dismissed == [50], "another window is the person's at once")
+check(look(&f, [50, 60], active: .window(8)) == .window(60) && f.back == .window(8), "a new prompt beside a dismissed one is followed, back to the person's pick")
+check(f.picked(.window(50), now: 11) && f.prompt == 50 && f.dismissed.isEmpty, "picking a dismissed prompt shows it again")
+
+f = Follow(); _ = look(&f, [50], active: .window(7)); f.devicesLeft()
+check(f == Follow(), "the last device leaving forgets everything")
+check(look(&f, [50], active: .none) == .window(50), "a device coming back is taken to the open prompt")
+
+f = Follow(); _ = look(&f, [50], active: .window(7), at: 10)
+check(!f.armed(now: 20, away: false), "not armed before it shows")
+f.streaming(.window(50), now: 20)
+check(!f.armed(now: 20.74, away: false) && f.armed(now: 20.75, away: false), "armed 0.75 s after it shows")
+check(!f.armed(now: 21.99, away: true) && f.armed(now: 22, away: true), "armed 2 s after it shows for a device away")
+f.streaming(.window(50), now: 30)
+check(f.armed(now: 20.75, away: false), "a later look does not restart the delay")
+f.streaming(.desktop, now: 31); f.streaming(.window(50), now: 32)
+check(!f.armed(now: 32.5, away: false), "shown again: the delay starts again")
+
 print("catalog-windows: \(cases) checks, \(failures) failed")
 if failures > 0 { exit(1) }

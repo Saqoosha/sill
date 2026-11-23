@@ -646,7 +646,7 @@ package final class StreamCoordinator {
                 // On the software encoder, the hardware is checked only while someone watches.
                 if count == 0 { self.stopRecheck() } else { self.devicesPresent(firstArrived: wasEmpty) }
                 // With nobody left, no window comes back at the unlock (LockPolicy.Restore).
-                if count == 0 { self.restore.devicesLeft() }
+                if count == 0 { self.restore.devicesLeft(); self.promptFollow.devicesLeft() }
                 if count > 0 {
                     self.deselectWhenSettled = false
                 } else if self.switching {
@@ -692,7 +692,23 @@ package final class StreamCoordinator {
             // 2026-11-01), and a device asks for the Desktop again the moment nothing streams: the lock is
             // read again first, so that pick meets the new reading (LockPolicy; the placeholder off console).
             SessionLock.shared.lookNow(cause: "the capture stopped")
-            Task { @MainActor in await self?.select(.none) }
+            Task { @MainActor in
+                guard let self else { return }
+                // A closed prompt ends its capture before the next poll: look now, and restart it if it is still open.
+                if let prompt = self.promptFollow.prompt, self.active == .window(prompt) {
+                    await self.catalog.refreshWindows()
+                    guard self.active == .window(prompt) else { return }
+                    // At most one restart per poll; a capture that keeps failing is retried by `catalogPolled`.
+                    let now = CFAbsoluteTimeGetCurrent()
+                    if self.catalog.onePasswordPromptIDs.contains(prompt), now - self.promptRestartAt >= WindowCatalog.pollSeconds {
+                        self.promptRestartAt = now
+                        await self.select(.window(prompt))
+                        return
+                    }
+                    if await self.followOnePasswordPrompt() { return }
+                }
+                await self.select(.none)
+            }
         }
         // Status for the menu bar app. The server's callbacks hop here from its network queue; the
         // stats tick runs on the main queue, which under the CLI's dispatchMain is drained by a
@@ -1269,6 +1285,14 @@ package final class StreamCoordinator {
                 if injector.isUpOfSomethingDown(event) { deliver(event, in: .null, from: device) }
                 return
             }
+            // A tap aimed at the picture before a prompt took over must not land on its Approve button.
+            let onPrompt = active == promptFollow.prompt.map(StreamSource.window)
+            if promptSwitch != nil || (onPrompt && !promptFollow.armed(now: CFAbsoluteTimeGetCurrent(), away: awayRunning))
+                || pressHitsUnseenPrompt(event) {
+                injector.stopRepeating()
+                if injector.isUpOfSomethingDown(event) { deliver(event, in: .null, from: device) }
+                return
+            }
             // A click, a key or text may close a view a gesture opened; a move or a scroll does not.
             gestureChords.input(Self.gestureInput(event))
             // A synthetic host acts on nothing: it posts no event (InputInjector.dryRun), so it
@@ -1841,7 +1865,8 @@ package final class StreamCoordinator {
         }
         // A locked Mac sizes no window (LockPolicy): the one streaming at the lock gives way to the placeholder.
         // Nor does the off-console view (Accessibility acts in a session nobody at the device can use).
-        guard case .window(let id) = active, lockAllowed.actsOnWindows, let w = catalog.window(id: id) else { return }
+        guard case .window(let id) = active, lockAllowed.actsOnWindows, !catalog.onePasswordPromptIDs.contains(id),
+              let w = catalog.window(id: id) else { return }
         if fitToViewport(w) != nil { await catalog.refreshWindows() }
     }
 
@@ -1877,8 +1902,10 @@ package final class StreamCoordinator {
     /// device, or a pick made before the device heard of the close, can still let it land during
     /// a restart that follows the user's pick, and then it is queued like the user's own.
     private func handlePick(_ source: StreamSource) async {
+        guard promptFollow.picked(Self.followSource(source), now: CFAbsoluteTimeGetCurrent()) else { return }
         if switching {
-            if let r = restartOf, source != r { pickArrivedWhileSwitching = source }
+            // Queued only on the way to a prompt: on the way back, this is the device's automatic Desktop request.
+            if let r = restartOf ?? (promptFollow.prompt != nil ? promptSwitch : nil), source != r { pickArrivedWhileSwitching = source }
             return
         }
         await select(source, bringForward: true)
@@ -1914,6 +1941,7 @@ package final class StreamCoordinator {
         defer {
             switching = false
             restartOf = nil
+            promptFollow.streaming(Self.followSource(active), now: CFAbsoluteTimeGetCurrent())
             var pick = pickArrivedWhileSwitching
             pickArrivedWhileSwitching = nil
             // Requests that arrived mid-switch, applied now that `switching` is clear again (every
@@ -2094,7 +2122,9 @@ package final class StreamCoordinator {
             streamedPID = w.owningApplication.map { (window: id, pid: $0.processID) }
             title = Self.menuTitle(for: w)
             var size = w.frame.size
-            if virtualDisplay, stage.disabledReason == nil, lockAllowed.virtualDisplay {
+            // A 1Password prompt streams where it is: never moved to the virtual display, never resized.
+            let isPrompt = catalog.onePasswordPromptIDs.contains(id)
+            if virtualDisplay, !isPrompt, stage.disabledReason == nil, lockAllowed.virtualDisplay {
                 let want = wantedStage(for: w)
                 // A window Sill sized in regular mode (the virtual display turned on while it
                 // streamed): the stage keeps the frame it would have gone back to as its way home.
@@ -2147,7 +2177,7 @@ package final class StreamCoordinator {
                 // Fit the window to the client's panel before capture starts, so the stream comes up
                 // at the new size instead of restarting once the catalog notices. `w` is a snapshot
                 // with the old frame; the window server has the new one.
-                if acts, let resized = fitToViewport(w) { size = Self.liveBounds(of: id)?.size ?? resized }
+                if acts, !isPrompt, let resized = fitToViewport(w) { size = Self.liveBounds(of: id)?.size ?? resized }
                 describe = "\(w.owningApplication?.applicationName ?? "?") — \(w.title ?? "")\(useSoftwareEncoder ? " (software encoder)" : "")"
             }
             if sourceRect == nil {
@@ -2493,6 +2523,10 @@ package final class StreamCoordinator {
     /// entering or leaving full screen: the staged full-screen window, or in regular mode one that was
     /// full screen when last listed or that Sill fitted (`windowsChanged`).
     private var missingPolls = 0
+    /// 1Password mode (`followOnePasswordPrompt`), and the source a follow is switching to.
+    private var promptFollow = CatalogWindows.PromptFollow()
+    private var promptSwitch: StreamSource?
+    private var promptRestartAt: CFAbsoluteTime = 0
     private var lastRaiseCheck: CFAbsoluteTime = 0
     private var lastActivationAt: CFAbsoluteTime = 0
     /// Input held for an activation, replayed in order once the app is up, each with the device that
@@ -2618,6 +2652,8 @@ package final class StreamCoordinator {
         // arriving through a tap on the switcher). The event itself is still delivered, so no
         // key-up or button-up goes missing.
         guard !switching, case .window(let id) = active else { return }
+        // A prompt floats above every app: activating 1Password would only bring its main window forward.
+        if catalog.onePasswordPromptIDs.contains(id) { return }
         // Scroll routes to the window under the cursor whatever the active app is: it only needs
         // uncovering (regular path). Clicks, keys and text need the app active and the window key.
         let needsFocus: Bool
@@ -2686,7 +2722,7 @@ package final class StreamCoordinator {
     /// debugger pause) holds every device's input and the catalog for a second per call: raise
     /// and key share one window lookup, and none is made once the activation ran into its timeout.
     private func activateAndRaise(window w: SCWindow) {
-        guard let pid = w.owningApplication?.processID else { return }
+        guard !catalog.onePasswordPromptIDs.contains(w.windowID), let pid = w.owningApplication?.processID else { return }
         guard activate(pid: pid) else {
             print("\(w.owningApplication?.applicationName ?? "?") is not answering Accessibility; its window is not raised.")
             return
@@ -2855,6 +2891,8 @@ package final class StreamCoordinator {
     /// before a fit landed can still give at its old value; a resize is `windowsChanged`'s.
     private func catalogPolled() {
         menusPolled()
+        // Also here: a prompt that appeared during a switch is followed at the next poll.
+        Task { @MainActor in await self.followOnePasswordPrompt() }
         guard !switching, !shuttingDown, case .window(let id) = active, !(virtualDisplay && stage.isStaged),
               let w = catalog.window(id: id), capturePixelScale(of: w) != streamPixelScale else { return }
         Task { @MainActor in
@@ -2917,6 +2955,7 @@ package final class StreamCoordinator {
     /// nothing. During a switch (`active` still names the old source) nothing is activated.
     private func focusForMenus() async -> Bool {
         guard case .window(let id) = active else { return true }
+        if catalog.onePasswordPromptIDs.contains(id) { return false }
         let staged = virtualDisplay && stage.isStaged
         guard let pid = staged ? stage.placement?.pid : catalog.window(id: id)?.owningApplication?.processID else { return false }
         let frontmost = Self.activePID(trustAppKit: appKitLoop) == pid
@@ -3405,9 +3444,11 @@ package final class StreamCoordinator {
         if !lockAllowed.windows, !Self.isWindow(active) { return }
         if let pending = pendingLaunch, let w = infos.first(where: { $0.bundleID == pending }) {
             pendingLaunch = nil
+            _ = promptFollow.picked(.window(w.id), now: CFAbsoluteTimeGetCurrent())
             await select(.window(w.id), bringForward: true)   // launched from the device to use it: a pick
             return
         }
+        if await followOnePasswordPrompt() { return }
         if case .window(let id) = active {
             guard let w = infos.first(where: { $0.id == id }) else {
                 // Alive on the virtual display even if the on-screen list dropped it.
@@ -3467,6 +3508,53 @@ package final class StreamCoordinator {
             }
         }
         broadcastList()
+    }
+
+    /// 1Password mode: a connected device switches to an approval prompt when it appears, and back to
+    /// what it showed when the prompt closes. A pick of something else meanwhile cancels the way back
+    /// (`handlePick`). True when this call switched the stream.
+    @discardableResult
+    private func followOnePasswordPrompt() async -> Bool {
+        guard !switching, !shuttingDown, !lockReading.locked, catalog.clientCount > 0 else { return false }
+        guard let target = promptFollow.observe(prompts: catalog.onePasswordPromptIDs, windows: catalog.windows.map(\.windowID),
+                                                active: Self.followSource(active), comesBack: restore.comesBack,
+                                                now: CFAbsoluteTimeGetCurrent()) else { return false }
+        let source: StreamSource
+        switch target {
+        case .none: source = .none
+        case .desktop: source = .desktop
+        case .window(let id): source = .window(id)
+        }
+        print("1Password mode: \(promptFollow.prompt == nil ? "prompt closed, back to the previous source" : "showing approval prompt").")
+        promptSwitch = source
+        await select(source)
+        promptSwitch = nil
+        return true
+    }
+
+    /// A click on a window source that would land on a 1Password prompt the device cannot see in that picture.
+    private func pressHitsUnseenPrompt(_ event: InputEvent) -> Bool {
+        guard case .window(let streamed) = active, case .pointer(let action, _, _) = event,
+              action == .leftDown || action == .rightDown, let point = injectorProbePoint(event),
+              let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return false }
+        return list.contains { info in
+            guard let id = info[kCGWindowNumber as String] as? CGWindowID, id != streamed,
+                  let pid = info[kCGWindowOwnerPID as String] as? pid_t,
+                  let layer = info[kCGWindowLayer as String] as? Int,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds), frame.contains(point) else { return false }
+            let window = CatalogWindows.Window(title: nil, appName: nil, bundleID: NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
+                                               pid: pid, layer: layer, width: Double(frame.width), height: Double(frame.height))
+            return CatalogWindows.isOnePasswordPrompt(window)
+        }
+    }
+
+    private static func followSource(_ source: StreamSource) -> CatalogWindows.PromptFollow.Source {
+        switch source {
+        case .none: return .none
+        case .desktop: return .desktop
+        case .window(let id): return .window(id)
+        }
     }
 
     private var encoderWidth: Int { encoder?.width ?? 0 }
