@@ -905,6 +905,7 @@ extension StreamClient {
     /// A 1Password notification's tap: connects to the paired Mac it names, which then shows its prompt.
     /// It sends no input, and prefers the home row over the remote door.
     private func connectForApproval(_ url: URL) {
+        TapLog.note("approval link opened; connected \(connected)")
         guard url.host?.lowercased() == "approve",
               let name = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "mac" })?.value,
               case let named = savedMacs.filter({ $0.name == name && $0.revoked != true }), named.count == 1,
