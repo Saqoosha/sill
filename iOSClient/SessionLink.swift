@@ -108,17 +108,22 @@ final class SessionLink {
         set { lock.lock(); current = newValue; inputs = waitingInputs; lock.unlock() }
     }
 
+    enum Sent: String { case onConnection = "handed to the connection", kept = "kept behind a hand-over", dropped = "dropped: no connection" }
+
     /// One message to the Mac: on the session's connection, or kept, in order, while a fence or a
     /// hold stands.
-    func send(_ data: Data) {
+    @discardableResult
+    func send(_ data: Data) -> Sent {
         lock.lock(); defer { lock.unlock() }
         if !fences.isEmpty || holding != nil {
             waiting.append(data)
             if Self.isInput(data) { inputs += 1 }
-            return
+            return .kept
         }
-        current?.send(content: data, completion: .contentProcessed { _ in })
-        if current != nil, Self.isInput(data) { inputs += 1 }
+        guard let current else { return .dropped }
+        current.send(content: data, completion: .contentProcessed { _ in })
+        if Self.isInput(data) { inputs += 1 }
+        return .onConnection
     }
 
     /// Whether `c` is still read: the session's connection, or the old one of a hand-over until its

@@ -905,19 +905,23 @@ extension StreamClient {
     /// A 1Password notification's tap: connects to the paired Mac it names, which then shows its prompt.
     /// It sends no input, and prefers the home row over the remote door.
     private func connectForApproval(_ url: URL) {
+        TapLog.note("approval link opened; connected \(connected)")
         guard url.host?.lowercased() == "approve",
               let name = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "mac" })?.value,
               case let named = savedMacs.filter({ $0.name == name && $0.revoked != true }), named.count == 1,
               let mac = named.first else {
             status = "This notification doesn't name one Mac this device is paired with."
+            TapLog.note("approval link: no single paired Mac by that name")
             return
         }
         // A link never ends a session: any app can open it.
-        if connected { return }
-        if remoteDial != nil || connection != nil, hostName == displayName(mac.macID) { return }
+        if connected { TapLog.note("approval link: already connected"); return }
+        if remoteDial != nil || connection != nil, hostName == displayName(mac.macID) { TapLog.note("approval link: already dialing this Mac"); return }
         if let row = macs.first(where: { $0.savedID == mac.macID && $0.route != .remote }) {
+            TapLog.note("approval link: connecting through the \(row.route) row")
             connect(to: row)
         } else {
+            TapLog.note("approval link: dialing the saved Mac")
             reconnect = nil
             cancelHomeAsk()
             dialSaved(mac.macID, why: .tap)

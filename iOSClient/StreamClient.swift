@@ -4017,7 +4017,8 @@ final class StreamClient: ObservableObject {
             self.pointerNoteSent(event)
             guard case .pointer(.move, _, _) = event else {
                 self.flushPendingMove()
-                self.send(.input, Wire.encode(event))
+                let sent = self.send(.input, Wire.encode(event))
+                if case .pointer(let action, _, _) = event { TapLog.note("\(action) to the Mac: \(sent.rawValue)") }
                 return
             }
             let now = CACurrentMediaTime()
@@ -4097,10 +4098,11 @@ final class StreamClient: ObservableObject {
         send(.input, Wire.encode(move))
     }
 
-    private func send(_ kind: StreamMessageKind, _ payload: Data) {
+    @discardableResult
+    private func send(_ kind: StreamMessageKind, _ payload: Data) -> SessionLink.Sent {
         let message = StreamMessage(kind: kind, timestamp: Date().timeIntervalSince1970,
                                     isKeyframe: false, payload: payload)
-        link.send(message.serialized())
+        return link.send(message.serialized())
     }
 
     /// A pick, a launch, a window's button or a menu item, behind the input already on its way
