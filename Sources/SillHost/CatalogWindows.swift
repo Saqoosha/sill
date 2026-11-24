@@ -88,20 +88,33 @@ enum CatalogWindows {
             && (300...600).contains(w.width) && (200...600).contains(w.height)
     }
 
-    /// When a prompt that no device is watching should send a notification.
+    /// When a prompt that no device is watching should send a notification. One notification covers
+    /// every prompt open when it is sent, and a later prompt waits its own delay.
     struct PromptNotifier: Equatable {
-        /// Consecutive prompts (several Environments approved in a row) send one notification.
-        static let minimumGap = 15.0
+        /// A prompt approved at the Mac within this long sends nothing. 1Password closes it after 60 s.
+        static let delay = 20.0
+        /// A prompt that lasted this long closed unanswered: 1Password's timeout, not an approval.
+        static let timedOutAge = 55.0
+        /// After a prompt timed out, the next one within this long is sent at once.
+        static let missedWindow = 300.0
         private var notified: Set<UInt32> = []
-        private var lastSentAt: Double?
+        private var firstSeen: [UInt32: Double] = [:]
+        private var missedAt: Double?
 
-        /// A prompt stays pending while a device watches or the gap runs, so it is sent once either ends.
+        /// A prompt stays pending while a device watches, so it is sent once the device leaves.
         mutating func shouldNotify(prompts: [UInt32], watching: Bool, now: Double) -> Bool {
             let current = Set(prompts)
             notified.formIntersection(current)
-            guard !current.subtracting(notified).isEmpty, !watching else { return false }
-            if let lastSentAt, now - lastSentAt < Self.minimumGap { return false }
-            lastSentAt = now
+            for (id, seen) in firstSeen where !current.contains(id) {
+                missedAt = now - seen >= Self.timedOutAge ? now : nil
+            }
+            firstSeen = firstSeen.filter { current.contains($0.key) }
+            for id in current where firstSeen[id] == nil { firstSeen[id] = now }
+            let missed = missedAt.map { now - $0 <= Self.missedWindow } ?? false
+            let wait = missed ? 0 : Self.delay
+            let due = current.subtracting(notified).filter { now - firstSeen[$0, default: now] >= wait }
+            guard !due.isEmpty, !watching else { return false }
+            missedAt = nil
             notified = current
             return true
         }
