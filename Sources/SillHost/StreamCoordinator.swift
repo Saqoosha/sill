@@ -3694,8 +3694,8 @@ package final class StreamCoordinator {
         let now = ProcessInfo.processInfo.systemUptime
         let prompts = WindowCatalog.livePrompts().map(\.id)
         notePrompts(prompts)
-        guard !shuttingDown, !lockReading.locked,
-              promptNotifier.shouldNotify(prompts: prompts, watching: catalog.clientCount > 0, now: now) else { return }
+        if lockReading.locked { promptNotifier.locked(); return }
+        guard !shuttingDown, promptNotifier.shouldNotify(prompts: prompts, watching: catalog.clientCount > 0, now: now) else { return }
         let status = notify_post("sh.saqoo.sill.1password-prompt")
         print(status == 0 ? "1Password mode: notification posted." : "1Password mode: could not post the notification (\(status)).")
     }

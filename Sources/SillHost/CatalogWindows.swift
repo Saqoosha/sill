@@ -93,8 +93,9 @@ enum CatalogWindows {
     struct PromptNotifier: Equatable {
         /// A prompt approved at the Mac within this long sends nothing. 1Password closes it after 60 s.
         static let delay = 20.0
-        /// A prompt that lasted this long closed unanswered: 1Password's timeout, not an approval.
-        static let timedOutAge = 55.0
+        /// A prompt that lasted this long closed unanswered: 1Password's timeout, not an approval. Seen
+        /// once a second, a timeout reads 59-61 s and an approval near the end 58 s at most.
+        static let timedOutAge = 59.0
         /// After a prompt timed out, the next one within this long is sent at once.
         static let missedWindow = 300.0
         private var notified: Set<UInt32> = []
@@ -105,9 +106,9 @@ enum CatalogWindows {
         mutating func shouldNotify(prompts: [UInt32], watching: Bool, now: Double) -> Bool {
             let current = Set(prompts)
             notified.formIntersection(current)
-            for (id, seen) in firstSeen where !current.contains(id) {
-                missedAt = now - seen >= Self.timedOutAge ? now : nil
-            }
+            // Any approval among the prompts that just closed means someone answered.
+            let closed = firstSeen.filter { !current.contains($0.key) }
+            if !closed.isEmpty { missedAt = closed.values.allSatisfy { now - $0 >= Self.timedOutAge } ? now : nil }
             firstSeen = firstSeen.filter { current.contains($0.key) }
             for id in current where firstSeen[id] == nil { firstSeen[id] = now }
             let missed = missedAt.map { now - $0 <= Self.missedWindow } ?? false
@@ -117,6 +118,12 @@ enum CatalogWindows {
             missedAt = nil
             notified = current
             return true
+        }
+
+        /// While the Mac is locked nothing is sent, and a prompt closing then says nothing about a miss.
+        mutating func locked() {
+            firstSeen = [:]
+            missedAt = nil
         }
     }
 
