@@ -62,6 +62,8 @@ MUTANTS = {
                                                      "        current = new\n        inputs = 0\n        guard let h = holding"),
     "C7 what waits is not counted": ("            waiting.append(data)\n            if Self.isInput(data) { inputs += 1 }\n", "            waiting.append(data)\n"),
     "C8 what goes out at once is not counted": ("        if Self.isInput(data) { inputs += 1 }\n        return .onConnection\n", "        return .onConnection\n"),
+    "C20 a kept input reported sent": ("            return .kept\n", "            return .onConnection\n"),
+    "C21 a dropped input reported sent": ("        guard let current else { return .dropped }\n", "        guard let current else { return .onConnection }\n"),
     "C9 an input with no connection counted": ("        guard let current else { return .dropped }\n", "        guard let current else { if Self.isInput(data) { inputs += 1 }; return .dropped }\n"),
     "C10 every message counted, not only inputs": ("private static func isInput(_ data: Data) -> Bool { data.first == 8 }",
                                                    "private static func isInput(_ data: Data) -> Bool { !data.isEmpty }"),

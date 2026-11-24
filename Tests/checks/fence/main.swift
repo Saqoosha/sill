@@ -359,6 +359,13 @@ func countMode(_ c0: NWConnection) -> Never {
     }
     func inputs(_ n: Int) { for _ in 0..<n { seq += 1; link.send(message(.input, be32(seq))) } }
     func notInput() { link.send(message(.viewport, Data(#"{"width":1,"height":1}"#.utf8))) }
+    /// One input, and what `send` says it did with it.
+    func sent(_ what: String, _ want: SessionLink.Sent) {
+        seq += 1
+        let got = link.send(message(.input, be32(seq)))
+        print("sent: \(what): \(got)\(got == want ? "" : ", want \(want)")")
+        if got != want { bad += 1 }
+    }
     func fence(_ from: NWConnection, _ to: NWConnection) -> Data {
         let nonce = randomNonce()
         link.handOver(from: from, to: to, fencePing: message(.ping, nonce), nonce: nonce)
@@ -374,10 +381,11 @@ func countMode(_ c0: NWConnection) -> Never {
     expect("two inputs kept for the fence", 2)
     _ = link.fenceReturned(n1, on: c0)
     expect("the fence down: what waited went out on the connection it was counted for", 2)
-    inputs(1)
+    sent("one more, at once", .onConnection)
     expect("one more, sent at once", 3)
     _ = link.hold(c1)
-    inputs(2)
+    sent("one held", .kept)
+    inputs(1)
     expect("two held", 5)
     let c2 = connect()
     _ = link.adopt(c2)
@@ -411,13 +419,14 @@ func countMode(_ c0: NWConnection) -> Never {
     expect("one more", 5)
     let c6 = connect()
     _ = fence(c5, c6)
-    inputs(3)
+    sent("one kept for a fence", .kept)
+    inputs(2)
     expect("three kept for a fence", 3)
     link.connection = nil
     expect("the session's connection gone: they still wait", 3)
     _ = link.dropHandOver()
     expect("a new session drops the hand-over, and what waited never goes out", 0)
-    inputs(1)
+    sent("an input with no connection", .dropped)
     expect("an input with no connection goes nowhere", 0)
     let c7 = connect()
     link.connection = c7

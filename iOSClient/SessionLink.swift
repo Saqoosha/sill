@@ -108,10 +108,10 @@ final class SessionLink {
         set { lock.lock(); current = newValue; inputs = waitingInputs; lock.unlock() }
     }
 
+    enum Sent: String { case onConnection = "handed to the connection", kept = "kept behind a hand-over", dropped = "dropped: no connection" }
+
     /// One message to the Mac: on the session's connection, or kept, in order, while a fence or a
     /// hold stands.
-    enum Sent: String { case onConnection = "sent", kept = "kept behind a hand-over", dropped = "dropped: no connection" }
-
     @discardableResult
     func send(_ data: Data) -> Sent {
         lock.lock(); defer { lock.unlock() }

@@ -2248,7 +2248,7 @@ final class StrokeObserver: UIGestureRecognizer, UIGestureRecognizerDelegate, Wa
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
         for touch in ordered(touches) {
             guard let id = ids.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
-            TapLog.note("\(surface) touch \(id) cancelled by the system")
+            TapLog.note("\(surface) touch \(id) cancelled")
             strokes.cancelled(id)
             onTouch(.cancelled(id))
         }
