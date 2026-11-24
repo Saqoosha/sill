@@ -102,8 +102,9 @@ enum PromptPress {
                 print("1Password mode: the button under the tap is disabled; nothing pressed.")
                 return
             case .nothing:
-                print("1Password mode: no button under the tap on the covered prompt; nothing pressed.")
-                return
+                // The window's own buttons can exist before the web content's.
+                why = "no button under the tap"
+                Thread.sleep(forTimeInterval: 0.1)
             case .notReady(let reason):
                 why = reason
                 Thread.sleep(forTimeInterval: 0.1)
@@ -142,10 +143,11 @@ enum PromptPress {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
               let windows = value as? [AXUIElement] else { return nil }
-        return windows.first { window in
+        let matching = windows.filter { window in
             AXUIElementSetMessagingTimeout(window, axTimeout)
             return frame(of: window).map { sameFrame($0, target) } ?? false
         }
+        return matching.count == 1 ? matching[0] : nil
     }
 
     /// The smallest button under the point. Reads roles and frames, never a field's value.
@@ -162,7 +164,9 @@ enum PromptPress {
             let role = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value) == .success ? value as? String : nil
             if role == (kAXButtonRole as String) {
                 buttons += 1
-                if let f = frame(of: element), f.contains(point), best == nil || f.width * f.height < best!.frame.width * best!.frame.height {
+                // An unread button could be the smaller one under the point.
+                guard let f = frame(of: element) else { return .notReady("a button's frame could not be read") }
+                if f.contains(point), best == nil || f.width * f.height < best!.frame.width * best!.frame.height {
                     best = (element, f, isEnabled(element))
                 }
             }

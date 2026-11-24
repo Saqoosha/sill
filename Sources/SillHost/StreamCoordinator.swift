@@ -609,6 +609,7 @@ package final class StreamCoordinator {
                 self.viewportRefusedLineAt[id] = nil
                 self.routes[id] = nil
                 self.promptTap.forget(id)
+                self.promptDepartures += 1
                 self.lastPairingWanted[id] = nil
                 self.connections[id] = nil
                 self.appsAndIconsSent.remove(id)
@@ -2541,6 +2542,8 @@ package final class StreamCoordinator {
     private var promptFollow = CatalogWindows.PromptFollow()
     private var promptSwitch: StreamSource?
     private var promptTap = CatalogWindows.PromptTap<KeyStrokes.Device>()
+    /// A connection's identifier can be reused, so a press waiting for its button ends at any departure.
+    private var promptDepartures = 0
     private var promptRestartAt: CFAbsoluteTime = 0
     private var promptNotifier = CatalogWindows.PromptNotifier()
     private var promptWatch: Task<Void, Never>?
@@ -3598,8 +3601,10 @@ package final class StreamCoordinator {
                 return true
             case .press(let down, let up):
                 if let prompt {
+                    let departures = promptDepartures
                     PromptPress.press(prompt, down: down, up: up, tappedAt: now) { [weak self] in
-                        self?.promptPressAllowed(prompt, by: device) ?? false
+                        guard let self, self.promptDepartures == departures else { return false }
+                        return self.promptPressAllowed(prompt, by: device)
                     }
                 }
                 return true
