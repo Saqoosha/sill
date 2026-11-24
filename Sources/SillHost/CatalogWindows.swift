@@ -118,23 +118,29 @@ enum CatalogWindows {
         covers.contains { $0.alpha > 0 && $0.frame.contains(point) }
     }
 
-    /// One tap on a covered prompt. Its down and up never reach the window above it.
+    /// Each device's tap on a covered prompt. Its down and up never reach the window above it, and
+    /// it presses only the prompt it began on.
     struct PromptTap<Device: Equatable> {
-        enum Up: Equatable { case notTaken, press(down: CGPoint, up: CGPoint) }
+        enum Up: Equatable { case notTaken, dropped, press(down: CGPoint, up: CGPoint) }
 
-        private var down: (device: Device, point: CGPoint)?
+        static var maxHold: Double { 10 }
+        private var held: [(device: Device, prompt: UInt32, point: CGPoint, at: Double)] = []
 
         /// Whether this press is taken. A press that is not covered goes to the Mac as a click.
-        mutating func press(_ device: Device, at point: CGPoint, covered: Bool) -> Bool {
-            down = covered ? (device, point) : nil
+        mutating func press(_ device: Device, prompt: UInt32, at point: CGPoint, covered: Bool, now: Double) -> Bool {
+            held.removeAll { $0.device == device }
+            if covered { held.append((device, prompt, point, now)) }
             return covered
         }
 
-        mutating func release(_ device: Device, at point: CGPoint) -> Up {
-            guard let held = down, held.device == device else { return .notTaken }
-            down = nil
-            return .press(down: held.point, up: point)
+        mutating func release(_ device: Device, prompt: UInt32?, at point: CGPoint, now: Double) -> Up {
+            guard let i = held.firstIndex(where: { $0.device == device }) else { return .notTaken }
+            let tap = held.remove(at: i)
+            guard tap.prompt == prompt, now - tap.at <= Self.maxHold else { return .dropped }
+            return .press(down: tap.point, up: point)
         }
+
+        mutating func forget(_ device: Device) { held.removeAll { $0.device == device } }
     }
 
     /// 1Password mode: which source a device should show as approval prompts open and close.

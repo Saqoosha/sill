@@ -608,6 +608,7 @@ package final class StreamCoordinator {
                 self.keyframeRequestAt[id] = nil
                 self.viewportRefusedLineAt[id] = nil
                 self.routes[id] = nil
+                self.promptTap.forget(id)
                 self.lastPairingWanted[id] = nil
                 self.connections[id] = nil
                 self.appsAndIconsSent.remove(id)
@@ -1279,6 +1280,7 @@ package final class StreamCoordinator {
             guard let event = passed?.event else { return }     // it does not decode, or a release held back
             let device = ObjectIdentifier(connection)
             guard let rect = currentSourceRect() else {
+                forgetPromptTap(event, from: device)
                 // Nothing streams (between sources, or the stream stopped: the window closed under a
                 // drag): input has nowhere to land. The up of a key or a button the Mac has down still
                 // goes (DroppedInput), a button's where the pointer is (`.null`), so no modifier this
@@ -1290,11 +1292,13 @@ package final class StreamCoordinator {
             }
             // A tap aimed at the picture before a prompt took over must not land on its Approve button.
             if promptHoldsInput(event, from: device) {
+                forgetPromptTap(event, from: device)
                 injector.stopRepeating()
                 if injector.isUpOfSomethingDown(event) { deliver(event, in: .null, from: device) }
                 return
             }
-            if promptTapTaken(event, in: rect, from: device) { return }
+            // Input queued for an activation is judged in its order, at the replay.
+            if heldInput.isEmpty, CFAbsoluteTimeGetCurrent() >= holdUntil, promptTapTaken(event, in: rect, from: device) { return }
             // A click, a key or text may close a view a gesture opened; a move or a scroll does not.
             gestureChords.input(Self.gestureInput(event))
             // A synthetic host acts on nothing: it posts no event (InputInjector.dryRun), so it
@@ -1946,7 +1950,10 @@ package final class StreamCoordinator {
             switching = false
             restartOf = nil
             promptFollow.streaming(Self.followSource(active), prompts: catalog.onePasswordPromptIDs, now: CFAbsoluteTimeGetCurrent())
-            if active != sourceBeforeSwitch { sourceShownAt = ProcessInfo.processInfo.systemUptime }
+            if active != sourceBeforeSwitch {
+                sourceShownAt = ProcessInfo.processInfo.systemUptime
+                if case .window(let id) = active, catalog.onePasswordPromptIDs.contains(id) { PromptPress.prepare(id) }
+            }
             // A prompt seen during this switch is shown now, not at the next poll.
             if promptSwitch == nil, !catalog.onePasswordPromptIDs.isEmpty { Task { @MainActor in await self.followOnePasswordPrompt() } }
             var pick = pickArrivedWhileSwitching
@@ -2580,6 +2587,7 @@ package final class StreamCoordinator {
                 }
                 // A prompt can open during the hold: judged again, where the press would land.
                 if promptHoldsInput(event, from: device, in: rect) {
+                    forgetPromptTap(event, from: device)
                     injector.stopRepeating()
                     if injector.isUpOfSomethingDown(event) { injector.apply(event, in: .null, from: device) }
                     continue
@@ -3560,7 +3568,6 @@ package final class StreamCoordinator {
         }
         print("1Password mode: \(promptFollow.prompt == nil ? "prompt closed, back to the previous source" : "showing approval prompt").")
         promptSwitch = source
-        if case .window(let id) = source, catalog.onePasswordPromptIDs.contains(id) { PromptPress.prepare(id) }
         await select(source)
         promptSwitch = nil
         return true
@@ -3569,28 +3576,53 @@ package final class StreamCoordinator {
     /// A tap on a streamed prompt that another window covers: its button is pressed through
     /// Accessibility, and no click goes to the window on top.
     private func promptTapTaken(_ event: InputEvent, in rect: CGRect, from device: KeyStrokes.Device) -> Bool {
-        guard !synthetic, !lockReading.locked, case .pointer(let action, _, _) = event,
-              let point = injectorProbePoint(event, in: rect) else { return false }
+        guard !synthetic, case .pointer(let action, _, _) = event else { return false }
+        if lockReading.locked { forgetPromptTap(event, from: device); return false }
+        guard let point = injectorProbePoint(event, in: rect) else { return false }
         var prompt: CGWindowID?
-        if case .window(let id) = active, catalog.onePasswordPromptIDs.contains(id) { prompt = id }
+        if case .window(let id) = active, catalog.onePasswordPromptIDs.contains(id) || promptFollow.prompt == id { prompt = id }
+        let unmatchedUp = prompt != nil && heldInput.isEmpty && !injector.isUpOfSomethingDown(event)
         switch action {
         case .leftDown:
-            return promptTap.press(device, at: point, covered: prompt.map { PromptPress.isCovered($0, at: point) } ?? false)
+            guard let prompt else { promptTap.forget(device); return false }
+            // A prompt that just closed: the picture is stale, and a click would land on what was under it.
+            guard WindowCatalog.livePrompts().contains(where: { $0.id == prompt }) else { promptTap.forget(device); return true }
+            return promptTap.press(device, prompt: prompt, at: point, covered: PromptPress.isCovered(prompt, at: point),
+                                   now: ProcessInfo.processInfo.systemUptime)
         case .leftUp:
-            switch promptTap.release(device, at: point) {
-            case .notTaken: return false
+            let now = ProcessInfo.processInfo.systemUptime
+            switch promptTap.release(device, prompt: prompt, at: point, now: now) {
+            case .notTaken: return unmatchedUp
+            case .dropped:
+                print("1Password mode: a tap outlived the prompt it began on; nothing pressed.")
+                return true
             case .press(let down, let up):
-                if let prompt { PromptPress.press(prompt, down: down, up: up) }
-                else { print("1Password mode: the covered prompt is no longer streamed; nothing pressed.") }
+                if let prompt {
+                    PromptPress.press(prompt, down: down, up: up, tappedAt: now) { [weak self] in
+                        self?.promptPressAllowed(prompt, by: device) ?? false
+                    }
+                }
                 return true
             }
         case .rightDown:
-            return prompt.map { PromptPress.isCovered($0, at: point) } ?? false
+            guard let prompt else { return false }
+            return !WindowCatalog.livePrompts().contains(where: { $0.id == prompt }) || PromptPress.isCovered(prompt, at: point)
         case .rightUp:
-            return prompt != nil && !injector.isUpOfSomethingDown(event)
+            return unmatchedUp
         case .move:
             return false
         }
+    }
+
+    private func forgetPromptTap(_ event: InputEvent, from device: KeyStrokes.Device) {
+        if case .pointer(let action, _, _) = event, action != .move { promptTap.forget(device) }
+    }
+
+    /// Checked right before a found button is pressed: the same prompt still streams to a served device.
+    private func promptPressAllowed(_ id: CGWindowID, by device: KeyStrokes.Device) -> Bool {
+        guard !shuttingDown, !lockReading.locked, promptSwitch == nil, active == .window(id),
+              let route = routes[device], !gone(device) else { return false }
+        return promptFollow.armed(now: CFAbsoluteTimeGetCurrent(), away: route.isAway)
     }
 
     /// Whether this input must not reach the Mac because a 1Password prompt is not yet safely on the device.
