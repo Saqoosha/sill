@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Which of ScreenCaptureKit's on-screen windows the catalog lists: the tiles in a device's window
@@ -103,6 +104,36 @@ enum CatalogWindows {
             lastSentAt = now
             notified = current
             return true
+        }
+    }
+
+    /// A window in front of a 1Password prompt.
+    struct PromptCover: Equatable {
+        let alpha: Double
+        let frame: CGRect
+    }
+
+    /// Whether a click at `point` would land on a visible window instead of the prompt.
+    static func isPromptCovered(at point: CGPoint, by covers: [PromptCover]) -> Bool {
+        covers.contains { $0.alpha > 0 && $0.frame.contains(point) }
+    }
+
+    /// One tap on a covered prompt. Its down and up never reach the window above it.
+    struct PromptTap<Device: Equatable> {
+        enum Up: Equatable { case notTaken, press(down: CGPoint, up: CGPoint) }
+
+        private var down: (device: Device, point: CGPoint)?
+
+        /// Whether this press is taken. A press that is not covered goes to the Mac as a click.
+        mutating func press(_ device: Device, at point: CGPoint, covered: Bool) -> Bool {
+            down = covered ? (device, point) : nil
+            return covered
+        }
+
+        mutating func release(_ device: Device, at point: CGPoint) -> Up {
+            guard let held = down, held.device == device else { return .notTaken }
+            down = nil
+            return .press(down: held.point, up: point)
         }
     }
 

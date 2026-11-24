@@ -75,6 +75,14 @@ MUTANTS = [
     ("a closed prompt stays sent", "notified.formIntersection(current)", ""),
     ("any window starts the delay", "guard case .window(let id) = active, prompts.contains(id) else", "guard case .window(let id) = active else"),
     ("the last device leaving keeps the state", "mutating func devicesLeft() { self = PromptFollow() }", "mutating func devicesLeft() {}"),
+    ("cover: ignores alpha", "covers.contains { $0.alpha > 0 && $0.frame.contains(point) }", "covers.contains { $0.frame.contains(point) }"),
+    ("cover: ignores place", "covers.contains { $0.alpha > 0 && $0.frame.contains(point) }", "covers.contains { $0.alpha > 0 }"),
+    ("tap: uncovered taken", "down = covered ? (device, point) : nil\n            return covered", "down = covered ? (device, point) : nil\n            return true"),
+    ("tap: keeps old press", "down = covered ? (device, point) : nil", "if covered { down = (device, point) }"),
+    ("tap: any device", "guard let held = down, held.device == device else", "guard let held = down else"),
+    ("tap: presses twice", "guard let held = down, held.device == device else { return .notTaken }\n            down = nil", "guard let held = down, held.device == device else { return .notTaken }"),
+    ("tap: down is the lift", ".press(down: held.point, up: point)", ".press(down: point, up: point)"),
+    ("tap: up is the down", ".press(down: held.point, up: point)", ".press(down: held.point, up: held.point)"),
 ]
 caught = 0
 for name, old, new in MUTANTS:

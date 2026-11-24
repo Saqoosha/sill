@@ -294,5 +294,23 @@ check(n.shouldNotify(prompts: [50], watching: false, now: 2), "the device left w
 _ = n.shouldNotify(prompts: [], watching: false, now: 3)
 check(n.shouldNotify(prompts: [50], watching: false, now: 18), "the same ID after it closed is a new prompt")
 
+// MARK: 1Password mode: a covered prompt
+
+let spot = CGPoint(x: 100, y: 100)
+let full = CGRect(x: 0, y: 0, width: 500, height: 500)
+check(!CatalogWindows.isPromptCovered(at: spot, by: []), "nothing above the prompt")
+check(CatalogWindows.isPromptCovered(at: spot, by: [.init(alpha: 1, frame: full)]), "a full-screen alert covers it")
+check(!CatalogWindows.isPromptCovered(at: spot, by: [.init(alpha: 0, frame: full)]), "an invisible window does not")
+check(!CatalogWindows.isPromptCovered(at: spot, by: [.init(alpha: 1, frame: CGRect(x: 200, y: 200, width: 50, height: 50))]), "a window elsewhere does not")
+var tap = CatalogWindows.PromptTap<Int>()
+check(!tap.press(1, at: spot, covered: false) && tap.release(1, at: spot) == .notTaken, "an uncovered tap stays a click")
+check(tap.press(1, at: spot, covered: true), "a covered press is taken")
+check(tap.release(2, at: spot) == .notTaken, "another device's release is not this tap")
+let lifted = CGPoint(x: 140, y: 100)
+check(tap.release(1, at: lifted) == .press(down: spot, up: lifted), "a release reports where the tap began and where it lifted")
+check(tap.release(1, at: spot) == .notTaken, "one tap presses once")
+_ = tap.press(1, at: spot, covered: true); _ = tap.press(1, at: spot, covered: false)
+check(tap.release(1, at: spot) == .notTaken, "a later uncovered press forgets the covered one")
+
 print("catalog-windows: \(cases) checks, \(failures) failed")
 if failures > 0 { exit(1) }

@@ -1294,6 +1294,7 @@ package final class StreamCoordinator {
                 if injector.isUpOfSomethingDown(event) { deliver(event, in: .null, from: device) }
                 return
             }
+            if promptTapTaken(event, in: rect, from: device) { return }
             // A click, a key or text may close a view a gesture opened; a move or a scroll does not.
             gestureChords.input(Self.gestureInput(event))
             // A synthetic host acts on nothing: it posts no event (InputInjector.dryRun), so it
@@ -2532,6 +2533,7 @@ package final class StreamCoordinator {
     /// 1Password mode (`followOnePasswordPrompt`), and the source a follow is switching to.
     private var promptFollow = CatalogWindows.PromptFollow()
     private var promptSwitch: StreamSource?
+    private var promptTap = CatalogWindows.PromptTap<KeyStrokes.Device>()
     private var promptRestartAt: CFAbsoluteTime = 0
     private var promptNotifier = CatalogWindows.PromptNotifier()
     private var promptWatch: Task<Void, Never>?
@@ -2582,6 +2584,7 @@ package final class StreamCoordinator {
                     if injector.isUpOfSomethingDown(event) { injector.apply(event, in: .null, from: device) }
                     continue
                 }
+                if promptTapTaken(event, in: rect, from: device) { continue }
                 logClick(event, in: rect); injector.apply(event, in: rect, from: device)
             case .chord(let keyCode, let flags, let device):
                 if gone(device) { Stats.shared.bump("in.revoked"); continue }
@@ -3557,9 +3560,37 @@ package final class StreamCoordinator {
         }
         print("1Password mode: \(promptFollow.prompt == nil ? "prompt closed, back to the previous source" : "showing approval prompt").")
         promptSwitch = source
+        if case .window(let id) = source, catalog.onePasswordPromptIDs.contains(id) { PromptPress.prepare(id) }
         await select(source)
         promptSwitch = nil
         return true
+    }
+
+    /// A tap on a streamed prompt that another window covers: its button is pressed through
+    /// Accessibility, and no click goes to the window on top.
+    private func promptTapTaken(_ event: InputEvent, in rect: CGRect, from device: KeyStrokes.Device) -> Bool {
+        guard !synthetic, !lockReading.locked, case .pointer(let action, _, _) = event,
+              let point = injectorProbePoint(event, in: rect) else { return false }
+        var prompt: CGWindowID?
+        if case .window(let id) = active, catalog.onePasswordPromptIDs.contains(id) { prompt = id }
+        switch action {
+        case .leftDown:
+            return promptTap.press(device, at: point, covered: prompt.map { PromptPress.isCovered($0, at: point) } ?? false)
+        case .leftUp:
+            switch promptTap.release(device, at: point) {
+            case .notTaken: return false
+            case .press(let down, let up):
+                if let prompt { PromptPress.press(prompt, down: down, up: up) }
+                else { print("1Password mode: the covered prompt is no longer streamed; nothing pressed.") }
+                return true
+            }
+        case .rightDown:
+            return prompt.map { PromptPress.isCovered($0, at: point) } ?? false
+        case .rightUp:
+            return prompt != nil && !injector.isUpOfSomethingDown(event)
+        case .move:
+            return false
+        }
     }
 
     /// Whether this input must not reach the Mac because a 1Password prompt is not yet safely on the device.

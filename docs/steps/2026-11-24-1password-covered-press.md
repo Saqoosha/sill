@@ -1,0 +1,8 @@
+**1Password covered press: a tap reaches a prompt under another window (2026-11-24, branch `1password-covered-press` from `sill-0.6.2`).** MeetingBar's full-screen alert sits on the screen saver level (1000), above the prompt (101). Sill streamed the prompt, but its click landed on the alert.
+
+- While a prompt streams and a visible window lies over the tapped point, the tap's down and up are not posted. `PromptPress` presses the button under it through Accessibility. An uncovered prompt still gets a normal click.
+- A tap off a button sends nothing, because a click there could press the hidden window's Join. A tap released off its button is cancelled, as on a Mac.
+- 1Password builds its accessibility tree after `AXManualAccessibility` is set, which took about 2 s, so the tree is requested when a follow starts. Taps within 1 s of a press count as the same tap.
+- The virtual display was not used: MeetingBar places its alert on every screen, and the person at the Mac needs to see the prompt.
+- Verified on Mac Studio and an iPhone over Tailscale, under a test window on the screen saver level that logs its clicks: Authorize was pressed and the prompt closed, and the window received no click. `Tests/checks/catalog-windows`: 132 checks and 69 of 69 mutants.
+- Open: in the last test the iPhone's first tap never reached the Mac, and the second worked. The cause is on the device and unknown. The first suspect is `normalized` judging the tap against the Desktop's size just after the switch to the prompt. Needs a logging build of Sill 1P. The real MeetingBar alert and password entry under a cover are untested.
