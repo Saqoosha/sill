@@ -75,6 +75,19 @@ MUTANTS = [
     ("a closed prompt stays sent", "notified.formIntersection(current)", ""),
     ("any window starts the delay", "guard case .window(let id) = active, prompts.contains(id) else", "guard case .window(let id) = active else"),
     ("the last device leaving keeps the state", "mutating func devicesLeft() { self = PromptFollow() }", "mutating func devicesLeft() {}"),
+    ("cover: ignores alpha", "covers.contains { $0.alpha > 0 && $0.frame.contains(point) }", "covers.contains { $0.frame.contains(point) }"),
+    ("cover: ignores place", "covers.contains { $0.alpha > 0 && $0.frame.contains(point) }", "covers.contains { $0.alpha > 0 }"),
+    ("tap: uncovered taken", "if covered { held.append((device, prompt, point, now)) }\n            return covered", "if covered { held.append((device, prompt, point, now)) }\n            return true"),
+    ("tap: keeps old press", "held.removeAll { $0.device == device }\n            if covered", "if covered"),
+    ("tap: any device", "held.firstIndex(where: { $0.device == device })", "held.firstIndex(where: { _ in true })"),
+    ("tap: presses twice", "let tap = held.remove(at: i)", "let tap = held[i]"),
+    ("tap: any prompt", "guard tap.prompt == prompt, now", "guard now"),
+    ("tap: no age limit", ", now - tap.at <= Self.maxHold else", " else"),
+    ("tap: hold shorter", "static var maxHold: Double { 10 }", "static var maxHold: Double { 9 }"),
+    ("tap: hold longer", "static var maxHold: Double { 10 }", "static var maxHold: Double { 11 }"),
+    ("tap: forget nothing", "mutating func forget(_ device: Device) { held.removeAll { $0.device == device } }", "mutating func forget(_ device: Device) { }"),
+    ("tap: down is the lift", ".press(down: tap.point, up: point)", ".press(down: point, up: point)"),
+    ("tap: up is the down", ".press(down: tap.point, up: point)", ".press(down: tap.point, up: tap.point)"),
 ]
 caught = 0
 for name, old, new in MUTANTS:

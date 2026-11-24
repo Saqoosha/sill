@@ -161,8 +161,13 @@ final class WindowCatalog {
 
     /// The genuine prompts on screen now, from the window server. Needs no device and no Screen Recording.
     nonisolated static func livePrompts() -> [(id: CGWindowID, frame: CGRect)] {
+        livePromptOwners().map { ($0.id, $0.frame) }
+    }
+
+    /// `livePrompts` with each prompt's process.
+    nonisolated static func livePromptOwners() -> [(id: CGWindowID, frame: CGRect, pid: pid_t)] {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return [] }
-        return list.compactMap { info -> (id: CGWindowID, frame: CGRect)? in
+        return list.compactMap { info -> (id: CGWindowID, frame: CGRect, pid: pid_t)? in
             guard let id = info[kCGWindowNumber as String] as? CGWindowID,
                   let pid = info[kCGWindowOwnerPID as String] as? pid_t,
                   let layer = info[kCGWindowLayer as String] as? Int, layer == 101,
@@ -170,7 +175,7 @@ final class WindowCatalog {
                   let frame = CGRect(dictionaryRepresentation: bounds) else { return nil }
             let window = CatalogWindows.Window(title: nil, appName: nil, bundleID: NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
                                                pid: pid, layer: layer, width: Double(frame.width), height: Double(frame.height))
-            return CatalogWindows.isOnePasswordPrompt(window) && isGenuineOnePassword(pid: pid) ? (id, frame) : nil
+            return CatalogWindows.isOnePasswordPrompt(window) && isGenuineOnePassword(pid: pid) ? (id, frame, pid) : nil
         }
     }
 
