@@ -10,20 +10,32 @@ import StreamProtocol
 enum TapLog {
     private static let logger = Logger(subsystem: "sh.saqoo.sill-1p", category: "tap")
     private static let queue = DispatchQueue(label: "sill.tap-log")
+    private static let maxBytes: UInt64 = 1_000_000
 
     static func note(_ message: String) {
-        logger.notice("\(message)")
-        let line = "\(ISO8601DateFormatter.tapLog.string(from: Date())) \(message)\n"
-        queue.async {
-            guard let data = line.data(using: .utf8),
-                  let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("tap.log") else { return }
-            if let handle = try? FileHandle(forWritingTo: url) {
-                defer { try? handle.close() }
-                _ = try? handle.seekToEnd()
-                try? handle.write(contentsOf: data)
-            } else {
-                try? data.write(to: url)
-            }
+        logger.notice("\(message, privacy: .public)")
+        let now = Date()
+        queue.async { append("\(ISO8601DateFormatter.tapLog.string(from: now)) \(message)\n") }
+    }
+
+    private static func append(_ line: String) {
+        let files = FileManager.default
+        guard let folder = files.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        let url = folder.appendingPathComponent("tap.log")
+        if let size = (try? files.attributesOfItem(atPath: url.path))?[.size] as? UInt64, size > maxBytes {
+            let old = folder.appendingPathComponent("tap.1.log")
+            try? files.removeItem(at: old)
+            do { try files.moveItem(at: url, to: old) } catch { logger.error("tap.log not rotated: \(error.localizedDescription, privacy: .public)") }
+        }
+        // Created only when missing: a failed open must never replace what the file already holds.
+        if !files.fileExists(atPath: url.path) { files.createFile(atPath: url.path, contents: nil) }
+        do {
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data(line.utf8))
+        } catch {
+            logger.error("tap.log write failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 }
@@ -329,14 +341,15 @@ final class InputOverlayView: UIView, UITextInput, UIGestureRecognizerDelegate {
     /// Long press: the right button, since there is no second finger to spare for it. What is composed
     /// goes, and what was typed is forgotten, only past the letterbox's guard, as for a tap.
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
-        guard !strokes.silent else { return }
         guard gesture.state == .began else { return }
+        guard !strokes.silent else { TapLog.note("long press dropped: the stroke is silent"); return }
         setOwnPointer(nil, .none)
         let point = gesture.location(in: self)
-        guard sendPointer(.move, at: point, clamped: false) != nil else { return }
+        guard sendPointer(.move, at: point, clamped: false) != nil else { TapLog.note("long press dropped: outside the picture"); return }
         forgetTyped()
         sendPointer(.rightDown, at: point, clamped: false)
         sendPointer(.rightUp, at: point, clamped: false)
+        TapLog.note("long press sent as a right click at \(Int(point.x)),\(Int(point.y))")
     }
 
     /// Finger pan: scrolling, not dragging, shaped like a Mac trackpad gesture so the Mac
@@ -2170,6 +2183,7 @@ final class StrokeObserver: UIGestureRecognizer, UIGestureRecognizerDelegate, Wa
         case down(Int, CGPoint), moved([Int: CGPoint]), up(Int), cancelled(Int)
     }
     var onTouch: (Touch) -> Void = { _ in }
+    private var surface: String { view is InputOverlayView ? "stream" : "trackpad" }
     /// Each touch of the stroke, numbered as it lands.
     private var ids: [ObjectIdentifier: Int] = [:]
     private var nextID = 0
@@ -2203,7 +2217,7 @@ final class StrokeObserver: UIGestureRecognizer, UIGestureRecognizerDelegate, Wa
             nextID += 1
             ids[ObjectIdentifier(touch)] = id
             let point = touch.location(in: view)
-            TapLog.note("touch down at \(Int(point.x)),\(Int(point.y))")
+            TapLog.note("\(surface) touch \(id) down at \(Int(point.x)),\(Int(point.y))")
             if strokes.down(id, at: point, time: touch.timestamp, holding: holding()) == .silenced { onSilenced() }
             onTouch(.down(id, point))
         }
@@ -2223,6 +2237,7 @@ final class StrokeObserver: UIGestureRecognizer, UIGestureRecognizerDelegate, Wa
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
         for touch in ordered(touches) {
             guard let id = ids.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
+            TapLog.note("\(surface) touch \(id) up")
             if case .gesture(let gesture, let fingers) = strokes.up(id, at: touch.location(in: view), time: touch.timestamp) {
                 onGesture(gesture, fingers)
             }
@@ -2233,6 +2248,7 @@ final class StrokeObserver: UIGestureRecognizer, UIGestureRecognizerDelegate, Wa
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
         for touch in ordered(touches) {
             guard let id = ids.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
+            TapLog.note("\(surface) touch \(id) cancelled by the system")
             strokes.cancelled(id)
             onTouch(.cancelled(id))
         }
@@ -2244,6 +2260,7 @@ final class StrokeObserver: UIGestureRecognizer, UIGestureRecognizerDelegate, Wa
     override func reset() {
         super.reset()
         for id in ids.values.sorted() {
+            TapLog.note("\(surface) touch \(id) never ended")
             strokes.cancelled(id)
             onTouch(.cancelled(id))
         }
